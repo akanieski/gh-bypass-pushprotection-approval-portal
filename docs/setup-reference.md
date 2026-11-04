@@ -70,6 +70,8 @@ dotnet run --project src\ApprovalPortal -- --urls https://localhost:7443
 
 Open **https://localhost:7443/approvals**. The app loads user-secrets because the environment is explicitly `Development`. The root `.env` file is for Docker Compose and is **not** automatically loaded by `dotnet run`.
 
+Alternatively, follow the README and run `.\Start-LocalDev.ps1`: it explicitly loads `.env`, maps Compose variable names to `Portal__...`, uses the repository's `secrets` and `data` directories, and starts `dotnet watch`. The launcher overrides the Compose public origin with `https://localhost:7443` (or `-Url`) and restores the calling process's environment when it exits. `.env` values are single-line literals; no interpolation or escape expansion is performed.
+
 Cookie authentication always requires HTTPS, including locally.
 
 To try the workflow, have a third, non-allowlisted developer create a delegated bypass request in the configured test repository. Wait for a successful worker sync, then have the two allowlisted reviewers sign in using separate browser profiles and review the request. One approval must leave GitHub pending; two eligible approvals allow the worker to submit the native decision. An accepted rejection queues denial instead. This is a real integration: use a disposable test repository and never introduce a real credential as a test secret. The app generates no reviewer notifications.

@@ -22,35 +22,20 @@ Use **FileSystem**, which saves approval state under `DataDirectory/approvals`. 
 
 ### 3. Configure the portal
 
-Replace the GitHub values below, including all three numeric `0` placeholders:
+Copy the settings and fill in your GitHub values, including all three numeric `0` placeholders. Set `PORTAL_ENABLED=true`.
 
 ```powershell
-@'
-{
-  "Portal": {
-    "Enabled": true,
-    "StorageProvider": "FileSystem",
-    "PublicOrigin": "https://localhost:7443",
-    "OAuthClientId": "YOUR_CLIENT_ID",
-    "AppId": "YOUR_APP_ID",
-    "InstallationId": 0,
-    "Repositories": ["YOUR_ORG/YOUR_REPO"],
-    "ApproverIds": [0, 0]
-  }
-}
-'@ | dotnet user-secrets set --project src\ApprovalPortal
+Copy-Item .env.example .env
 ```
 
 ### 4. Run
 
 ```powershell
-$env:ASPNETCORE_ENVIRONMENT = 'Development'
-$env:Portal__DataDirectory = Join-Path (Get-Location) 'data'
-$env:Portal__OAuthClientSecretFile = (Resolve-Path .\secrets\oauth-client-secret).Path
-$env:Portal__AppPrivateKeyFile = (Resolve-Path .\secrets\github-app.pem).Path
 dotnet dev-certs https --trust
-dotnet run --project src\ApprovalPortal -- --urls https://localhost:7443
+.\Start-LocalDev.ps1
 ```
+
+The launcher loads `.env`, maps Compose settings, and runs `dotnet watch`. It uses local `secrets` files, repository `data`, and overrides the public origin with `https://localhost:7443` (`-Url` changes it). `-EnvFile` selects another settings file. Values are single-line literals; comments and quotes are supported, but variable interpolation and escape expansion are not.
 
 Open **https://localhost:7443/approvals** and sign in with GitHub. `/` redirects here; the list shows visible pending requests still needing approval.
 
