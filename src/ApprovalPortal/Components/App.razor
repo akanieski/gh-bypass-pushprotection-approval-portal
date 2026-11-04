@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Customer Approval Portal</title>
+    <link rel="stylesheet" href="/portal.css" />
+    <HeadOutlet />
+</head>
+<body>
+    <header><a href="/secret-protection">Customer Approval Portal</a><span>Two external approvals. One GitHub decision.</span></header>
+    <main>
+        <p class="notice">Customer-hosted custom integration, not a native GitHub quorum feature. Never paste secrets into this portal.</p>
+        <Router AppAssembly="typeof(Program).Assembly">
+            <Found Context="routeData"><RouteView RouteData="routeData" /></Found>
+            <NotFound><h1>Page not found</h1><a href="/secret-protection">Return to requests</a></NotFound>
+        </Router>
+    </main>
+    <footer>Push-protection bypass requests only. Notifications and alert dismissal are not implemented.</footer>
+</body>
+</html>

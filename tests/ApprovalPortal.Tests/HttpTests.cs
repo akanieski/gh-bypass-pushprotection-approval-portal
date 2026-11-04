@@ -1,0 +1,129 @@
+using System.Net;
+using System.Security.Claims;
+using System.Text.Encodings.Web;
+using System.Text.RegularExpressions;
+using ApprovalPortal;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Xunit;
+
+namespace ApprovalPortal.Tests;
+
+public sealed class HttpTests
+{
+    [Fact]
+    public async Task AuthenticatedPageHasWorkingDetailRouteAndVoteIgnoresPostedActorId()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "portal-auth-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var keyFile = Path.Combine(directory, "fixture.txt");
+        await File.WriteAllTextAsync(keyFile, "fixture, not a key");
+        try
+        {
+            var store = new MemoryStore();
+            await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("Portal:DataDirectory", directory);
+                builder.ConfigureServices(services =>
+                {
+                    services.RemoveAll<PortalOptions>();
+                    services.AddSingleton(new PortalOptions
+                    {
+                        Enabled = true, PublicOrigin = "https://localhost", OAuthClientId = "test",
+                        OAuthClientSecret = "test", AppId = "1", InstallationId = 1, AppPrivateKeyFile = keyFile,
+                        Repositories = ["example/repo"], ApproverIds = [10, 20], DataDirectory = directory,
+                        S3Endpoint = "https://storage.example", S3Bucket = "private-test-bucket"
+                    });
+                    services.RemoveAll<IObjectStore>();
+                    services.AddSingleton<IObjectStore>(store);
+                    services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>();
+                    services.AddAuthentication("Test").AddScheme<AuthenticationSchemeOptions, TestIdentityHandler>("Test", _ => { });
+                });
+            });
+            var ledger = factory.Services.GetRequiredService<Ledger>();
+            var document = await ledger.LoadAsync(CancellationToken.None);
+            document.Requests.Add(new()
+            {
+                Native = new(101, 42, "example/repo", new(99, "requester"),
+                    DateTimeOffset.UtcNow.AddHours(-1), DateTimeOffset.UtcNow.AddDays(6), "pending", [],
+                    "https://github.com/example/repo/security/secret-scanning/bypass-requests/42"),
+                ObservedAt = DateTimeOffset.UtcNow
+            });
+            await ledger.SaveAsync(document, CancellationToken.None);
+            using var client = factory.CreateClient(new() { AllowAutoRedirect = false });
+            client.DefaultRequestHeaders.Add("X-Test-User", "20");
+            var page = await client.GetAsync("/secret-protection/example/repo/42");
+            Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+            var html = await page.Content.ReadAsStringAsync();
+            Assert.Contains("Inspect native request", html);
+            Assert.Contains("value=\"approve\"", html);
+            var match = Regex.Match(html, "name=\"__RequestVerificationToken\"[^>]*value=\"([^\"]+)\"");
+            Assert.True(match.Success);
+            var vote = await client.PostAsync("/vote", new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["__RequestVerificationToken"] = WebUtility.HtmlDecode(match.Groups[1].Value),
+                ["requestKey"] = "example/repo#42",
+                ["decision"] = "approve",
+                ["actorId"] = "10"
+            }));
+            Assert.Equal(HttpStatusCode.Redirect, vote.StatusCode);
+            var record = Assert.Single((await ledger.LoadAsync(CancellationToken.None)).Requests);
+            Assert.Equal(20, Assert.Single(record.Votes).ActorId);
+            client.DefaultRequestHeaders.Remove("X-Test-User");
+            client.DefaultRequestHeaders.Add("X-Test-User", "77");
+            html = await client.GetStringAsync("/secret-protection/example/repo/42");
+            Assert.Contains("Request not found or", html);
+            Assert.DoesNotContain("Inspect native request", html);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public async Task UnconfiguredPortalRunsWithoutCredentialsAndPostRequiresAntiforgery()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "portal-http-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+                builder.UseSetting("Portal:DataDirectory", directory));
+            using var client = factory.CreateClient(new() { AllowAutoRedirect = false });
+            var health = await client.GetAsync("/health");
+            Assert.Equal(HttpStatusCode.OK, health.StatusCode);
+            Assert.Contains("\"configured\":false", await health.Content.ReadAsStringAsync());
+            var page = await client.GetAsync("/secret-protection");
+            Assert.Equal(HttpStatusCode.OK, page.StatusCode);
+            Assert.Contains("Setup required", await page.Content.ReadAsStringAsync());
+            Assert.Equal("no-store", page.Headers.CacheControl?.ToString());
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, (await client.GetAsync("/login")).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/vote",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["actorId"] = "10", ["decision"] = "approve", ["requestKey"] = "example/repo#42"
+                }))).StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsync("/logout", null)).StatusCode);
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, true);
+        }
+
+    }
+
+    private sealed class TestIdentityHandler(IOptionsMonitor<AuthenticationSchemeOptions> options,
+        ILoggerFactory logger, UrlEncoder encoder) : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
+    {
+        protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+        {
+            var identity = new ClaimsIdentity([
+                new(ClaimTypes.NameIdentifier, Request.Headers["X-Test-User"].ToString()),
+                new(ClaimTypes.Name, "test-authenticated-user")
+            ], Scheme.Name);
+            return Task.FromResult(AuthenticateResult.Success(new(new ClaimsPrincipal(identity), Scheme.Name)));
+        }
+    }
+}

@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+**/TestResults/
+.vs/
+.env
+secrets/
+data/
+*.pem
+*.key
+*.user

@@ -1,0 +1,127 @@
+@page "/"
+@page "/secret-protection"
+@page "/secret-protection/{Owner}/{Repository}/{Number:int}"
+@inject PortalOptions Options
+@inject ApprovalService Approvals
+@inject WorkerStatus Worker
+@inject ILogger<Requests> Logger
+
+<h1>@(RequestKey is null ? "Secret protection" : "Review bypass request")</h1>
+@if (Recorded) { <p role="status" class="notice">Your immutable vote has been recorded. The next successful worker poll rechecks GitHub before any native decision.</p> }
+@if (AuthError)
+{
+    <p role="alert" class="error">GitHub sign-in failed. Try again or contact the portal operator.</p>
+}
+@if (!Options.Ready)
+{
+    <section class="error" role="alert"><h2>Setup required - live approvals unavailable</h2>
+        @foreach (var problem in Options.Problems()) { <p>@problem</p> }
+        <p>Follow the repository README. Missing configuration never enables demo identities or live approvals.</p>
+    </section>
+}
+@if (Worker.Error is not null) { <p role="alert" class="error">@Worker.Error</p> }
+<p>Last successful synchronization: @(Worker.LastSuccessfulPoll?.ToString("u") ?? "Not yet completed"). Refresh this page to see new status.</p>
+@if (actor is null)
+{
+    <p>Create the native bypass request in GitHub first, then sign in to find it here. The organization resource link is a static entry point, not a request submission form.</p>
+    @if (Options.Ready) { <a class="button" href="/login">Sign in with GitHub</a> }
+}
+else
+{
+    <div class="session"><span>Signed in as <strong>@actor.Login</strong> (GitHub ID @actor.Id).</span>
+        <form method="post" action="/logout"><AntiforgeryToken /><button>Sign out</button></form>
+    </div>
+    @if (!Options.Eligible(actor.Id)) { <p>You may view your own requests, but only configured approvers may vote.</p> }
+    @if (loadError is not null)
+    {
+        <p class="error" role="alert">@loadError</p>
+    }
+    else if (RequestKey is null)
+    {
+        <p>Two distinct eligible people, excluding the requester, must approve. Any accepted rejection blocks approval. Review the secret context in GitHub, not here.</p>
+        @if (records.Count == 0) { <p>No visible requests. The worker polls configured repositories; you can see your own requests or, as an eligible approver, all monitored requests.</p> }
+        @foreach (var record in records)
+        {
+            <article>
+                <h2><a href="@PortalLink(record)">@record.Native.Repository #@record.Native.Number</a></h2>
+                <p>Requester: @record.Native.Requester.Login | @record.State | @record.Approvals(Options) / 2 eligible approvals</p>
+                <p>Native status: @record.Native.Status | Expires @record.Native.ExpiresAt.ToString("u")</p>
+            </article>
+        }
+    }
+    else if (selected is null)
+    {
+        <p role="alert" class="error">Request not found or you do not have permission to view it.</p>
+        <a href="/secret-protection">Return to requests</a>
+    }
+    else
+    {
+        var record = selected;
+        <p><a href="/secret-protection">All requests</a></p>
+        <article>
+            <h2>@record.Native.Repository #@record.Native.Number</h2>
+            <p>Requester: @record.Native.Requester.Login (ID @record.Native.Requester.Id)</p>
+            <p><strong>@record.State</strong> | @record.Approvals(Options) / 2 currently eligible approvals</p>
+            <p>Native status: @record.Native.Status | Last checked @record.ObservedAt.ToString("u")</p>
+            <p>Created @record.Native.CreatedAt.ToString("u") | Expires @record.Native.ExpiresAt.ToString("u")</p>
+            <p><a href="@record.Native.GitHubUrl" target="_blank" rel="noopener noreferrer">Inspect native request in GitHub</a></p>
+            <p>Request-specific portal link (share only with authorized reviewers): <a href="@PortalLink(record)">this review page</a>. No notification is sent automatically.</p>
+            @if (record.Error is not null) { <p role="alert" class="error">@record.Error</p> }
+            @if (record.Decision is not null) { <p>Native intent: @record.Decision | Attempted @record.AttemptedAt?.ToString("u") | Review ID @(record.ReviewId?.ToString() ?? "Unconfirmed")</p> }
+            <h3>Authenticated decisions</h3>
+            @if (record.Votes.Count == 0) { <p>No decisions yet.</p> }
+            @foreach (var vote in record.Votes)
+            {
+                <p>@vote.Login (ID @vote.ActorId): <strong>@(vote.Approve ? "Approved" : "Rejected")</strong> at @vote.At.ToString("u")
+                    @(!Options.Eligible(vote.ActorId) ? "- no longer eligible for approval quorum" : "")</p>
+            }
+            @if (CanVote(record))
+            {
+                <form method="post" action="/vote">
+                    <AntiforgeryToken />
+                    <input type="hidden" name="requestKey" value="@record.Native.Key" />
+                    <button class="approve" name="decision" value="approve">Approve</button>
+                    <button class="reject" name="decision" value="reject">Reject</button>
+                </form>
+                <p>Votes are final. A rejection accepted before the worker starts finalization blocks approval. Once finalization begins, voting closes.</p>
+            }
+            else { <p>Voting is unavailable: check eligibility, prior votes, rejection, expiry, synchronization freshness, and finalization status.</p> }
+        </article>
+    }
+}
+
+@code {
+    [Parameter] public string? Owner { get; set; }
+    [Parameter] public string? Repository { get; set; }
+    [Parameter] public int? Number { get; set; }
+    private string? RequestKey => Owner is null ? null : $"{Owner}/{Repository}#{Number}".ToLowerInvariant();
+    [SupplyParameterFromQuery(Name = "recorded")] public bool Recorded { get; set; }
+    [SupplyParameterFromQuery(Name = "authError")] public bool AuthError { get; set; }
+    [CascadingParameter] private Task<AuthenticationState> AuthenticationState { get; set; } = default!;
+    private Actor? actor;
+    private List<RequestRecord> records = [];
+    private RequestRecord? selected;
+    private string? loadError;
+    protected override async Task OnParametersSetAsync()
+    {
+        actor = Actor.FromPrincipal((await AuthenticationState).User);
+        if (actor is null) return;
+        try
+        {
+            records = await Approvals.VisibleAsync(actor);
+            selected = records.SingleOrDefault(r => r.Native.Key == RequestKey);
+        }
+        catch (Exception ex) when (ex is Amazon.Runtime.AmazonClientException or StorageUnavailableException
+            or StorageConflictException or System.Text.Json.JsonException or IOException)
+        {
+            loadError = "Approval records are unavailable. No votes can be submitted. Contact the portal operator and retry after storage is restored.";
+            Logger.LogError("Approval ledger read failed; type {FailureType}.", ex.GetType().Name);
+        }
+    }
+    private static string PortalLink(RequestRecord record) => record.Native.PortalPath;
+    private bool CanVote(RequestRecord record) => actor is not null && Options.Ready &&
+        Options.Eligible(actor.Id) && actor.Id != record.Native.Requester.Id &&
+        record.State == "Pending" && record.Native.IsPending(DateTimeOffset.UtcNow) &&
+        DateTimeOffset.UtcNow - record.ObservedAt <= TimeSpan.FromMinutes(5) &&
+        !record.Votes.Any(v => v.ActorId == actor.Id || !v.Approve);
+}

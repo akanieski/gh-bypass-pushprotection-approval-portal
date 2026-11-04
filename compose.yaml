@@ -1,0 +1,47 @@
+services:
+  portal:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      Portal__Enabled: "${PORTAL_ENABLED:-false}"
+      Portal__PublicOrigin: "${PORTAL_PUBLIC_ORIGIN:-}"
+      Portal__OAuthClientId: "${GITHUB_OAUTH_CLIENT_ID:-}"
+      Portal__OAuthClientSecretFile: /run/secrets/oauth-client-secret
+      Portal__AppId: "${GITHUB_APP_ID:-}"
+      Portal__InstallationId: "${GITHUB_INSTALLATION_ID:-0}"
+      Portal__AppPrivateKeyFile: /run/secrets/github-app-key
+      Portal__Repositories__0: "${GITHUB_REPOSITORY:-}"
+      Portal__ApproverIds__0: "${APPROVER_ID_1:-0}"
+      Portal__ApproverIds__1: "${APPROVER_ID_2:-0}"
+      Portal__TrustedProxies__0: "${TRUSTED_PROXY_IP:-127.0.0.1}"
+      Portal__PollSeconds: "${POLL_SECONDS:-60}"
+      Portal__S3Endpoint: "${S3_ENDPOINT:-}"
+      Portal__S3Region: "${S3_REGION:-us-east-1}"
+      Portal__S3Bucket: "${S3_BUCKET:-}"
+      Portal__S3Prefix: "${S3_PREFIX:-approval-portal/}"
+      Portal__S3ForcePathStyle: "${S3_PATH_STYLE:-true}"
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/s3-credentials
+    volumes:
+      - portal-data:/data
+    secrets:
+      - oauth-client-secret
+      - github-app-key
+      - s3-credentials
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+secrets:
+  oauth-client-secret:
+    file: ./secrets/oauth-client-secret
+  github-app-key:
+    file: ./secrets/github-app.pem
+  s3-credentials:
+    file: ./secrets/s3-credentials
+volumes:
+  portal-data:

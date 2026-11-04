@@ -1,0 +1,17 @@
+:root { font-family: system-ui, sans-serif; color: #1f2328; background: #f6f8fa; line-height: 1.5; }
+body { margin: 0; }
+header { padding: 1.3rem max(1rem, calc((100% - 65rem)/2)); background: #24292f; color: white; }
+header a { color: white; font-size: 1.3rem; font-weight: 650; text-decoration: none; }
+header span { display: block; color: #d1d9e0; }
+main, footer { max-width: 65rem; margin: auto; padding: 1.2rem; }
+footer { color: #59636e; font-size: .9rem; }
+a { color: #0969da; overflow-wrap: anywhere; }
+article { background: white; border: 1px solid #d1d9e0; border-radius: .5rem; padding: 1.2rem; margin: 1rem 0; }
+h2 { font-size: 1.2rem; }
+.notice, .error { padding: .8rem 1rem; border-radius: .35rem; background: #ddf4ff; border: 1px solid #54aeff; }
+.error { background: #fff1e5; border-color: #bc4c00; }
+.session { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+button, .button { display: inline-block; font: inherit; border: 1px solid #8c959f; border-radius: .35rem; padding: .45rem .9rem; cursor: pointer; background: white; }
+button:focus-visible, a:focus-visible { outline: 3px solid #0969da; outline-offset: 3px; }
+.approve { background: #1f883d; border-color: #1f883d; color: white; }
+.reject { color: #cf222e; margin-left: .5rem; }
