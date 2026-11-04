@@ -1,12 +1,14 @@
-@page "/"
+@page "/approvals"
+@page "/approvals/{Owner}/{Repository}/{Number:int}"
 @page "/secret-protection"
 @page "/secret-protection/{Owner}/{Repository}/{Number:int}"
 @inject PortalOptions Options
 @inject ApprovalService Approvals
 @inject WorkerStatus Worker
 @inject ILogger<Requests> Logger
+@inject TimeProvider Clock
 
-<h1>@(RequestKey is null ? "Secret protection" : "Review bypass request")</h1>
+<h1>@(RequestKey is null ? "Pending approvals" : "Review bypass request")</h1>
 @if (Recorded) { <p role="status" class="notice">Your immutable vote has been recorded. The next successful worker poll rechecks GitHub before any native decision.</p> }
 @if (AuthError)
 {
@@ -39,7 +41,7 @@ else
     else if (RequestKey is null)
     {
         <p>Two distinct eligible people, excluding the requester, must approve. Any accepted rejection blocks approval. Review the secret context in GitHub, not here.</p>
-        @if (records.Count == 0) { <p>No visible requests. The worker polls configured repositories; you can see your own requests or, as an eligible approver, all monitored requests.</p> }
+        @if (records.Count == 0) { <p>No pending approvals visible to you. The worker polls configured repositories; you can see your own pending requests or, as an eligible approver, all monitored pending requests.</p> }
         @foreach (var record in records)
         {
             <article>
@@ -52,12 +54,12 @@ else
     else if (selected is null)
     {
         <p role="alert" class="error">Request not found or you do not have permission to view it.</p>
-        <a href="/secret-protection">Return to requests</a>
+        <a href="/approvals">Return to pending approvals</a>
     }
     else
     {
         var record = selected;
-        <p><a href="/secret-protection">All requests</a></p>
+        <p><a href="/approvals">Pending approvals</a></p>
         <article>
             <h2>@record.Native.Repository #@record.Native.Number</h2>
             <p>Requester: @record.Native.Requester.Login (ID @record.Native.Requester.Id)</p>
@@ -110,6 +112,12 @@ else
         {
             records = await Approvals.VisibleAsync(actor);
             selected = records.SingleOrDefault(r => r.Native.Key == RequestKey);
+            if (RequestKey is null)
+            {
+                var now = Clock.GetUtcNow();
+                records = records.Where(r => r.State == "Pending" && r.Native.IsPending(now) &&
+                    !r.Votes.Any(v => !v.Approve) && r.Approvals(Options) < 2).ToList();
+            }
         }
         catch (Exception ex) when (ex is Amazon.Runtime.AmazonClientException or StorageUnavailableException
             or StorageConflictException or System.Text.Json.JsonException or IOException or UnauthorizedAccessException)

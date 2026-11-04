@@ -72,7 +72,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
                 context.HttpContext.RequestServices.GetRequiredService<ILoggerFactory>()
                     .CreateLogger("GitHubSignIn").LogWarning("GitHub sign-in failed; no session was created.");
                 context.HandleResponse();
-                context.Response.Redirect("/secret-protection?authError=true");
+                context.Response.Redirect("/approvals?authError=true");
                 return Task.CompletedTask;
             }
         };
@@ -135,15 +135,16 @@ app.UseAuthorization();
 app.UseAntiforgery();
 
 app.MapGet("/health", () => Results.Ok(new { status = "alive", configured = options.Ready }));
+app.MapGet("/", () => Results.LocalRedirect("/approvals"));
 app.MapGet("/login", () => options.Ready
-    ? Results.Challenge(new AuthenticationProperties { RedirectUri = "/secret-protection" }, ["GitHub"])
+    ? Results.Challenge(new AuthenticationProperties { RedirectUri = "/approvals" }, ["GitHub"])
     : Results.Text("GitHub sign-in is unavailable until portal configuration is complete.", statusCode: 503));
 app.MapPost("/logout", async (HttpContext context, IAntiforgery antiforgery) =>
 {
     try { await antiforgery.ValidateRequestAsync(context); }
     catch (AntiforgeryValidationException) { return Results.Text("Invalid anti-forgery token.", statusCode: 400); }
     await context.SignOutAsync();
-    return Results.LocalRedirect("/secret-protection");
+    return Results.LocalRedirect("/approvals");
 });
 app.MapPost("/vote", async (HttpContext context, IAntiforgery antiforgery, ApprovalService approvals) =>
 {
@@ -158,7 +159,7 @@ app.MapPost("/vote", async (HttpContext context, IAntiforgery antiforgery, Appro
     try
     {
         await approvals.VoteAsync(form["requestKey"].ToString(), actor, decision == "approve", context.RequestAborted);
-        return Results.LocalRedirect("/secret-protection?recorded=true");
+        return Results.LocalRedirect("/approvals?recorded=true");
     }
     catch (VoteException ex) { return Results.Text(ex.Message, statusCode: 409); }
     catch (StorageConflictException) { return Results.Text("Approval state changed concurrently. Reload the request before voting again.", statusCode: 409); }

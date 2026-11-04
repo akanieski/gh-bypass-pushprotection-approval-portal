@@ -52,7 +52,9 @@ dotnet dev-certs https --trust
 dotnet run --project src\ApprovalPortal -- --urls https://localhost:7443
 ```
 
-Open **https://localhost:7443/secret-protection** and sign in with GitHub.
+Open **https://localhost:7443/approvals** and sign in with GitHub. `/` redirects here; the list shows visible pending requests still needing approval.
+
+Set the organization's blocked-push resource link to your deployed **`https://YOUR_PORTAL/approvals`** URL. Users must create the native GitHub bypass request first; the worker then discovers it.
 
 ### 5. Try an approval
 

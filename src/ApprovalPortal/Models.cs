@@ -18,7 +18,7 @@ public sealed record NativeRequest(
     DateTimeOffset CreatedAt, DateTimeOffset ExpiresAt, string Status, NativeResponse[] Responses, string GitHubUrl)
 {
     public string Key => $"{Repository.ToLowerInvariant()}#{Number}";
-    public string PortalPath => $"/secret-protection/{Repository}/{Number}";
+    public string PortalPath => $"/approvals/{Repository}/{Number}";
     public bool IsPending(DateTimeOffset now) =>
         Id > 0 && Number > 0 && Requester.Id > 0 &&
         CreatedAt <= now && ExpiresAt > now && CreatedAt.AddDays(7) > now &&

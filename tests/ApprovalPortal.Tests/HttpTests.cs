@@ -80,8 +80,10 @@ public sealed class HttpTests
         finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
     }
 
-    [Fact]
-    public async Task AuthenticatedPageHasWorkingDetailRouteAndVoteIgnoresPostedActorId()
+    [Theory]
+    [InlineData("/approvals")]
+    [InlineData("/secret-protection")]
+    public async Task AuthenticatedPageHasWorkingDetailRouteAndVoteIgnoresPostedActorId(string route)
     {
         var directory = Path.Combine(Path.GetTempPath(), "portal-auth-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -121,7 +123,7 @@ public sealed class HttpTests
             await ledger.SaveAsync(document, CancellationToken.None);
             using var client = factory.CreateClient(new() { AllowAutoRedirect = false });
             client.DefaultRequestHeaders.Add("X-Test-User", "20");
-            var page = await client.GetAsync("/secret-protection/example/repo/42");
+            var page = await client.GetAsync($"{route}/example/repo/42");
             Assert.Equal(HttpStatusCode.OK, page.StatusCode);
             var html = await page.Content.ReadAsStringAsync();
             Assert.Contains("Inspect native request", html);
@@ -136,13 +138,42 @@ public sealed class HttpTests
                 ["actorId"] = "10"
             }));
             Assert.Equal(HttpStatusCode.Redirect, vote.StatusCode);
-            var record = Assert.Single((await ledger.LoadAsync(CancellationToken.None)).Requests);
+            Assert.Equal("/approvals?recorded=true", vote.Headers.Location!.OriginalString);
+            document = await ledger.LoadAsync(CancellationToken.None);
+            var record = Assert.Single(document.Requests);
             Assert.Equal(20, Assert.Single(record.Votes).ActorId);
+            Assert.Equal("/approvals/example/repo/42", record.Native.PortalPath);
+            var excluded = new List<RequestRecord>();
+            foreach (var state in new[] { "Approved", "Denied", "Sending", "Submitted", "Uncertain", "ExternallyResolved", "Expired", "IdentityChanged" })
+                excluded.Add(new() { Native = record.Native with { Number = 100 + excluded.Count }, State = state });
+            excluded.Add(new() { Native = record.Native with { Number = 200, ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1) } });
+            excluded.Add(new() { Native = record.Native with { Number = 201, Responses = [new(1, "approved")] } });
+            excluded.Add(new() { Native = record.Native with { Number = 202 }, Votes = [new(10, "rejecter", false, DateTimeOffset.UtcNow)] });
+            excluded.Add(new() { Native = record.Native with { Number = 203 }, Votes = [
+                new(10, "first", true, DateTimeOffset.UtcNow), new(20, "second", true, DateTimeOffset.UtcNow)] });
+            excluded.Add(new() { Native = record.Native with { Number = 204, Repository = "unmonitored/repo" } });
+            document.Requests.AddRange(excluded);
+            await ledger.SaveAsync(document, CancellationToken.None);
+            html = await client.GetStringAsync(route);
+            Assert.Contains("Pending approvals", html);
+            Assert.Contains("href=\"/approvals/example/repo/42\"", html);
+            foreach (var hidden in excluded)
+                Assert.DoesNotContain($"href=\"{hidden.Native.PortalPath}\"", html);
+            html = await client.GetStringAsync("/approvals/example/repo/100");
+            Assert.Contains("Inspect native request", html);
+            Assert.DoesNotContain("value=\"approve\"", html);
             client.DefaultRequestHeaders.Remove("X-Test-User");
             client.DefaultRequestHeaders.Add("X-Test-User", "77");
-            html = await client.GetStringAsync("/secret-protection/example/repo/42");
+            html = await client.GetStringAsync($"{route}/example/repo/42");
             Assert.Contains("Request not found or", html);
             Assert.DoesNotContain("Inspect native request", html);
+            html = await client.GetStringAsync("/approvals");
+            Assert.Contains("No pending approvals visible", html);
+            Assert.DoesNotContain("href=\"/approvals/example/repo/42\"", html);
+            client.DefaultRequestHeaders.Remove("X-Test-User");
+            client.DefaultRequestHeaders.Add("X-Test-User", "99");
+            html = await client.GetStringAsync("/approvals");
+            Assert.Contains("href=\"/approvals/example/repo/42\"", html);
         }
         finally { Directory.Delete(directory, true); }
     }
@@ -160,7 +191,10 @@ public sealed class HttpTests
             var health = await client.GetAsync("/health");
             Assert.Equal(HttpStatusCode.OK, health.StatusCode);
             Assert.Contains("\"configured\":false", await health.Content.ReadAsStringAsync());
-            var page = await client.GetAsync("/secret-protection");
+            var root = await client.GetAsync("/");
+            Assert.Equal(HttpStatusCode.Redirect, root.StatusCode);
+            Assert.Equal("/approvals", root.Headers.Location!.OriginalString);
+            var page = await client.GetAsync("/approvals");
             Assert.Equal(HttpStatusCode.OK, page.StatusCode);
             Assert.Contains("Setup required", await page.Content.ReadAsStringAsync());
             Assert.Equal("no-store", page.Headers.CacheControl?.ToString());

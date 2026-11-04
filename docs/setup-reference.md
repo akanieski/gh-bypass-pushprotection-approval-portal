@@ -31,7 +31,7 @@ dotnet test tests\ApprovalPortal.Tests\ApprovalPortal.Tests.csproj
 dotnet run --project src\ApprovalPortal -- --urls http://localhost:5000
 ```
 
-With no configuration, open `http://localhost:5000/secret-protection` (or the address printed by ASP.NET). The application runs in an explicit setup-required state, performs no live integration, and never substitutes demo identities or data. The liveness endpoint is `/health`; its `configured` field reports static configuration completeness, **not** GitHub/storage connectivity or worker readiness. Check the portal's last successful synchronization and operator logs.
+With no configuration, open `http://localhost:5000/approvals` (or the address printed by ASP.NET). The application runs in an explicit setup-required state, performs no live integration, and never substitutes demo identities or data. The liveness endpoint is `/health`; its `configured` field reports static configuration completeness, **not** GitHub/storage connectivity or worker readiness. Check the portal's last successful synchronization and operator logs.
 
 ### Filesystem storage
 
@@ -68,7 +68,7 @@ dotnet dev-certs https --trust
 dotnet run --project src\ApprovalPortal -- --urls https://localhost:7443
 ```
 
-Open **https://localhost:7443/secret-protection**. The app loads user-secrets because the environment is explicitly `Development`. The root `.env` file is for Docker Compose and is **not** automatically loaded by `dotnet run`.
+Open **https://localhost:7443/approvals**. The app loads user-secrets because the environment is explicitly `Development`. The root `.env` file is for Docker Compose and is **not** automatically loaded by `dotnet run`.
 
 Cookie authentication always requires HTTPS, including locally.
 
@@ -149,10 +149,10 @@ Common setup failures:
 Set the optional organization-wide blocked-push resource link to:
 
 ```text
-https://approvals.customer.example/secret-protection
+https://approvals.customer.example/approvals
 ```
 
-This is the supported static resource URL, **not** an injected button, an automatic notification, or a request-ID template. Reviewers use `/secret-protection/OWNER/REPOSITORY/NUMBER`, which the portal exposes on request details. Only allowlisted approvers or the authenticated requester can see that request; the link itself grants no access.
+This is the supported static resource URL, **not** an injected button, an automatic notification, or a request-ID template. Users must create the native GitHub bypass request first and wait for worker synchronization. `/` redirects to `/approvals`, which lists visible pending, unexpired requests that have no rejection and still need approvals. Sign-in is required; only allowlisted approvers or the authenticated requester can see a request. Reviewers use `/approvals/OWNER/REPOSITORY/NUMBER`, which remains accessible for authorized review after voting closes. Existing `/secret-protection` links remain supported. The link itself grants no access.
 
 ## Configuration
 
