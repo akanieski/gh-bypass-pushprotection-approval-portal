@@ -1,6 +1,6 @@
 # Customer Approval Portal
 
-Customer-hosted Blazor portal + polling worker in one container, with two-person approvals. File system storage by default; S3 optional. Not a native GitHub feature.
+Customer-hosted Blazor portal + polling worker in one container, with two-person approvals and file system storage. Not a native GitHub feature.
 
 ## Get started locally
 
@@ -16,9 +16,9 @@ Requires .NET 10 SDK and GitHub CLI. No Docker or storage service needed for loc
 6. Save them as `secrets/oauth-client-secret` and `secrets/github-app.pem`. Keep credentials out of Git.
 7. Get each of your two reviewers' numeric IDs: `gh api users/LOGIN --jq .id`.
 
-### 2. Choose storage
+### 2. Configure storage
 
-Use the default **FileSystem** provider, which saves approval state under `DataDirectory/approvals`. For S3/MinIO instead, follow [storage configuration](docs/setup-reference.md#storage-selection-and-switching).
+Use **FileSystem**, which saves approval state under `DataDirectory/approvals`. The run command below sets this root to the repository's `data` directory. Keep it private and backed up.
 
 ### 3. Configure the portal
 
@@ -61,7 +61,5 @@ Have a third user create a delegated bypass request in the test repository. Wait
 ## Container deployment
 
 Configure `.env` from `.env.example`, create the two GitHub secret files, and run `docker compose up --build -d` behind HTTPS. The `portal-data` volume preserves state. Run only one app replica.
-
-For S3, use `docker compose -f compose.yaml -f compose.s3.yaml up --build -d` with S3 settings and credentials. Switching providers does **not** migrate existing state.
 
 [Container setup, configuration, troubleshooting, and safety limits](docs/setup-reference.md#docker-and-compose) | [Design brief](docs/Two-Approver-Secret-Protection.html)

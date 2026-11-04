@@ -1,8 +1,8 @@
 # Setup and operations reference
 
-A **customer-hosted custom integration**, not a GitHub product feature or configurable native quorum. One ASP.NET Core/.NET 10 application hosts a static-server-rendered Blazor portal and a polling `BackgroundService`. Request state and authenticated votes use **file system storage by default**, or an explicitly selected **S3-compatible bucket**. Both implement the same conditional `IObjectStore` contract. No database or separate worker process is required.
+A **customer-hosted custom integration**, not a GitHub product feature or configurable native quorum. One ASP.NET Core/.NET 10 application hosts a static-server-rendered Blazor portal and a polling `BackgroundService`. Request state and authenticated votes use **file system storage**. No database, storage service, or separate worker process is required.
 
-The original [design brief](Two-Approver-Secret-Protection.html) remains unchanged. This implementation replaces its assumed existing approval system with GitHub OAuth sign-in, a fixed approver allowlist, and selectable storage. **Automatic notifications are deferred**: operators must share request-specific portal links with eligible reviewers through their existing approved process. No emails, Teams messages, issues, or webhooks are generated.
+The original [design brief](Two-Approver-Secret-Protection.html) remains unchanged. This implementation replaces its assumed existing approval system with GitHub OAuth sign-in, a fixed approver allowlist, and local approval state. **Automatic notifications are deferred**: operators must share request-specific portal links with eligible reviewers through their existing approved process. No emails, Teams messages, issues, or webhooks are generated.
 
 ## What it does
 
@@ -16,12 +16,11 @@ The portal stores request identity, repository, requester ID/login, dates, nativ
 
 ## Local run
 
-File system storage needs no storage service or Docker. MinIO is optional for testing the S3 provider. [Azurite](https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite) and Azure Storage Emulator are not S3 endpoints; a native Azure Blob backend is not implemented.
+File system storage needs no storage service or Docker.
 
 Run commands from the repository root in PowerShell. Prerequisites:
 
 - Supported **.NET 10 SDK** (`global.json` rolls to an available .NET 10 feature band).
-- For optional MinIO only: Docker with Linux containers, Docker Compose, and [MinIO Client (`mc`)](https://github.com/minio/mc#install-from-binary) on your PATH. On Windows use `mc.exe`.
 - An organization-owned GitHub App, a test repository with delegated push-protection bypass enabled, and at least two eligible reviewers. Follow [GitHub App setup](#github-app-setup) before enabling the integration.
 
 ### Start without live credentials
@@ -34,77 +33,11 @@ dotnet run --project src\ApprovalPortal -- --urls http://localhost:5000
 
 With no configuration, open `http://localhost:5000/secret-protection` (or the address printed by ASP.NET). The application runs in an explicit setup-required state, performs no live integration, and never substitutes demo identities or data. The liveness endpoint is `/health`; its `configured` field reports static configuration completeness, **not** GitHub/storage connectivity or worker readiness. Check the portal's last successful synchronization and operator logs.
 
-### Storage selection and switching
+### Filesystem storage
 
-Set `Portal:StorageProvider` (`Portal__StorageProvider` in the environment) to **FileSystem** or **S3** and restart. FileSystem is the default, including in `.env.example` and base Compose. Unknown values fail explicitly; there is no fallback between providers.
+Use `Portal:StorageProvider=FileSystem` (`STORAGE_PROVIDER=FileSystem` in `.env` for Compose). Set `Portal:DataDirectory` to an absolute, private, writable local directory. Approval objects live in its `approvals` subdirectory; cookie keys live in `keys`.
 
-- **FileSystem:** set `Portal:DataDirectory` to an absolute, private, writable local directory. Approval objects live in its `approvals` subdirectory; cookie keys live in `keys`. No S3 endpoint, credentials, bucket, Docker, or emulator is required.
-- **S3:** explicitly select `S3`, provision the bucket, and configure the S3 settings and credentials below. MinIO is one option. Base Compose plus `compose.s3.yaml` selects S3 and mounts its credentials; `compose.minio.yaml` also selects S3 when used.
-
-**Existing S3 deployments must explicitly select S3 before upgrading** to retain their existing state store. Changing the provider or data location selects a different ledger; there is no automatic migration or synchronization. Stop the app before changing storage, back up the original state, and do not switch to an empty target while requests or uncertain native writes are outstanding. Filesystem objects use a versioned JSON envelope, not the raw S3 object format; copying raw files between providers is not a supported migration.
-
-### Start local S3-compatible storage
-
-The portal will run directly on your host; only MinIO runs in Docker. Its data persists in the `minio-data` volume. These commands create development-only administrator credentials in the ignored `secrets/` directory, not in source control:
-
-```powershell
-Copy-Item .env.example .env
-New-Item -ItemType Directory -Force .\secrets | Out-Null
-Set-Content .\secrets\minio-root-user -Value 'portal-local-admin' -NoNewline
-$rootPassword = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
-Set-Content .\secrets\minio-root-password -Value $rootPassword -NoNewline
-docker compose -f compose.yaml -f compose.minio.yaml up -d minio
-```
-
-Do not overwrite existing `.env` or credential files when restarting an existing setup. Restrict access to `secrets/`. The example assumes `S3_BUCKET=customer-approvals` and `S3_PREFIX=approval-portal/`; if you change them, also change the bucket and policy below.
-
-Once MinIO is ready, create the private bucket and a **restricted portal user**, rather than running the app with administrator credentials:
-
-```powershell
-$rootUser = (Get-Content .\secrets\minio-root-user -Raw).Trim()
-$rootPassword = (Get-Content .\secrets\minio-root-password -Raw).Trim()
-# Keep mc's local credential configuration under the ignored secrets directory.
-$env:MC_CONFIG_DIR = Join-Path (Get-Location) 'secrets\mc'
-mc.exe alias set portal-local http://localhost:9000 $rootUser $rootPassword
-mc.exe mb --ignore-existing portal-local/customer-approvals
-
-@'
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": ["s3:GetObject", "s3:PutObject"],
-    "Resource": ["arn:aws:s3:::customer-approvals/approval-portal/*"]
-  }]
-}
-'@ | Set-Content .\secrets\minio-policy.json
-
-$portalAccessKey = 'portal-worker'
-$portalSecretKey = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
-mc.exe admin user add portal-local $portalAccessKey $portalSecretKey
-mc.exe admin policy create portal-local approval-portal-state .\secrets\minio-policy.json
-mc.exe admin policy attach portal-local approval-portal-state --user $portalAccessKey
-@"
-[default]
-aws_access_key_id = $portalAccessKey
-aws_secret_access_key = $portalSecretKey
-"@ | Set-Content .\secrets\s3-credentials
-```
-
-If any command fails, stop and resolve the error before continuing; do not enable the portal with partially provisioned storage. `mc` provisioning commands are for this private local development instance, not a way to pass production credentials. The optional MinIO console is `http://localhost:9001`. Never make the bucket public.
-
-### Azure Blob Storage and local emulators
-
-**Not directly supported by the current app.** Azure Blob containers are not S3 buckets. Neither Azure Blob Storage, the legacy Azure Storage Emulator, nor Azurite exposes the S3 API used by this application's AWS SDK.
-
-- Do not set `Portal:S3Endpoint` to `https://ACCOUNT.blob.core.windows.net` or a local emulator's Blob endpoint.
-- An Azure connection string, `UseDevelopmentStorage=true`, SAS token, or storage account key cannot replace the portal's S3 configuration/credentials.
-- To use an Azure Blob container directly, first add an Azure Blob implementation of `IObjectStore`, preserving atomic ETag updates and create-if-absent behavior. That backend and its Azure/emulator configuration are **not implemented** here.
-- An Azure-hosted service exposing a genuine S3 endpoint can use the existing S3 settings. An S3-to-Blob gateway is a separate dependency, not native Azure support; no such gateway has been validated for this app. It must preserve atomic conditional writes and strong consistency, not just translate basic GET/PUT requests.
-
-Use the default filesystem provider to run without an emulator, or MinIO/another validated S3-compatible service for S3. Do not disable the conditional-write safety checks to make an emulator or gateway appear compatible.
-
-References: [Azure Blob REST API](https://learn.microsoft.com/en-us/rest/api/storageservices/blob-service-rest-api), [Microsoft Q&A on S3 compatibility](https://learn.microsoft.com/en-us/answers/questions/1183760/s3-api-support-over-azure-blob-storage), and [Azurite](https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite).
+Changing the data location selects a different ledger; there is no automatic migration or synchronization. Stop the app before changing it, back up the original state, and do not switch to an empty directory while requests or uncertain native writes are outstanding.
 
 ### Configure and run the local portal
 
@@ -123,19 +56,6 @@ dotnet user-secrets set 'Portal:ApproverIds:1' 'REPLACE_REVIEWER_2_NUMERIC_ID' -
 dotnet user-secrets set 'Portal:StorageProvider' 'FileSystem' --project src\ApprovalPortal
 ```
 
-For **S3/MinIO instead**, provision the bucket as above and replace the provider selection with:
-
-```powershell
-dotnet user-secrets set 'Portal:StorageProvider' 'S3' --project src\ApprovalPortal
-dotnet user-secrets set 'Portal:S3Endpoint' 'http://localhost:9000' --project src\ApprovalPortal
-dotnet user-secrets set 'Portal:S3Region' 'us-east-1' --project src\ApprovalPortal
-dotnet user-secrets set 'Portal:S3Bucket' 'customer-approvals' --project src\ApprovalPortal
-dotnet user-secrets set 'Portal:S3Prefix' 'approval-portal/' --project src\ApprovalPortal
-dotnet user-secrets set 'Portal:S3ForcePathStyle' 'true' --project src\ApprovalPortal
-dotnet user-secrets set 'Portal:S3AllowHttpForDevelopment' 'true' --project src\ApprovalPortal
-$env:AWS_SHARED_CREDENTIALS_FILE = (Resolve-Path .\secrets\s3-credentials).Path
-```
-
 In the terminal that will run the app, set paths to your external secret files, enable development configuration, and start HTTPS:
 
 ```powershell
@@ -148,13 +68,13 @@ dotnet dev-certs https --trust
 dotnet run --project src\ApprovalPortal -- --urls https://localhost:7443
 ```
 
-Open **https://localhost:7443/secret-protection**. The app loads user-secrets because the environment is explicitly `Development`. The root `.env` file is for Docker Compose and is **not** automatically loaded by `dotnet run`. S3 only: if you already have AWS credential environment variables or a profile configured, ensure they do not override the local shared credentials file.
+Open **https://localhost:7443/secret-protection**. The app loads user-secrets because the environment is explicitly `Development`. The root `.env` file is for Docker Compose and is **not** automatically loaded by `dotnet run`.
 
-Cookie authentication always requires HTTPS, including locally. MinIO's HTTP connection is a separate, explicitly enabled **local-development-only** exception. Do not copy that storage exception into production.
+Cookie authentication always requires HTTPS, including locally.
 
 To try the workflow, have a third, non-allowlisted developer create a delegated bypass request in the configured test repository. Wait for a successful worker sync, then have the two allowlisted reviewers sign in using separate browser profiles and review the request. One approval must leave GitHub pending; two eligible approvals allow the worker to submit the native decision. An accepted rejection queues denial instead. This is a real integration: use a disposable test repository and never introduce a real credential as a test secret. The app generates no reviewer notifications.
 
-Stop the host with Ctrl+C; retain `DataDirectory` across restarts. If using MinIO, stop it with `docker compose -f compose.yaml -f compose.minio.yaml stop minio`; this retains its data. Run the same `up -d minio` command and repeat the terminal environment settings to restart. Do not delete the volume or regenerate credentials as part of a routine restart.
+Stop the host with Ctrl+C; retain `DataDirectory` across restarts. Repeat the terminal environment settings to restart. Do not delete the data directory or regenerate credentials as part of a routine restart.
 
 ## GitHub App setup
 
@@ -218,11 +138,10 @@ Requester matching uses the bypass API's `requester.actor_id`, not the displayed
 
 Common setup failures:
 
-- **Setup required / sign-in unavailable:** configure installation authentication, two positive numeric reviewer IDs, repository and key path; S3 additionally needs its endpoint/bucket settings. `Enabled=true` alone is not enough.
+- **Setup required / sign-in unavailable:** configure installation authentication, two positive numeric reviewer IDs, repository and key path. `Enabled=true` alone is not enough.
 - **Callback mismatch or failed sign-in:** verify `https://localhost:7443/signin-github`, the App client ID/secret pair, trusted development certificate, and that sign-in began at the portal. Production origins/proxy settings must match too.
 - **GitHub 401:** check App ID, installation ID, PEM, client-secret pairing and machine clock. Browser OAuth and worker installation errors use different credentials.
 - **GitHub 403/404 or no requests:** check installation repository selection, approved App permissions, delegated bypass, entitlements, worker logs and the last successful synchronization. A registered App without an installation is insufficient.
-- **S3 authorization or conditional-write failure:** check the host endpoint `http://localhost:9000`, the explicitly enabled development HTTP exception, restricted user policy, and bucket/prefix. `http://minio:9000` is for the portal container on the Compose network, not the host process. Azurite is not a compatible replacement.
 - **Filesystem error:** ensure `DataDirectory` is writable and on a local disk, preserve the complete `approvals` directory, and check for corrupt objects or another process holding `.store.lock`. Never delete the lock or ledger while the app is running.
 
 ### Optional link on blocked pushes
@@ -242,30 +161,16 @@ Use ASP.NET configuration (`Portal:Name` in configuration providers; `Portal__Na
 | Setting | Meaning |
 |---|---|
 | `Enabled` | Explicit opt-in; defaults to `false`. |
-| `StorageProvider` | `FileSystem` (default) or `S3`. Requires restart; no automatic migration/fallback. |
+| `StorageProvider` | Keep `FileSystem` for this setup (the default). |
 | `PublicOrigin` | Canonical external HTTPS origin, with no path/query. Live requests must match its host and HTTPS scheme. |
 | `OAuthClientId` | GitHub App client ID for browser sign-in (or a separate OAuth App client ID). |
 | `OAuthClientSecretFile` | Read-only secret file; preferred over `OAuthClientSecret`. |
-| `AppId`, `InstallationId`, `AppPrivateKeyFile` | GitHub App installation authentication. PEM remains outside the image/bucket. |
+| `AppId`, `InstallationId`, `AppPrivateKeyFile` | GitHub App installation authentication. PEM remains outside the image and approval data. |
 | `Repositories__0`, `Repositories__1`, ... | Explicit `owner/repo` entries, no wildcard discovery. |
 | `ApproverIds__0`, `ApproverIds__1`, ... | Positive numeric GitHub user IDs; at least two distinct people. |
 | `PollSeconds` | 15-3600 seconds, default 60. Errors back off exponentially; rate-limit headers can delay longer. |
-| `S3Endpoint`, `S3Region`, `S3Bucket` | S3 only: explicit endpoint, signing region and existing private bucket. The application does not create buckets. |
-| `S3Prefix` | Dedicated non-root prefix ending with `/`, default `approval-portal/`. |
-| `S3ForcePathStyle` | `true` by default; set `false` for virtual-host-style services. |
-| `S3AllowHttpForDevelopment` | Explicit HTTP-only development exception, never enable for production storage. |
 | `DataDirectory` | Durable local root: `keys` for DataProtection; `approvals` for FileSystem state. Default `data` relative to the process working directory, `/data` in image. Prefer an absolute path. |
 | `TrustedProxies__0`, ... | Exact IPs of trusted HTTPS reverse proxies as seen by ASP.NET. One forwarded hop is accepted; host forwarding is not trusted. |
-
-S3 credentials use the AWS SDK's standard externally supplied credential chain (compatible access key/secret/session token environment variables, a shared credentials file, or supported workload credentials). This does **not** require AWS hosting. The S3/MinIO Compose overrides mount `AWS_SHARED_CREDENTIALS_FILE=/run/secrets/s3-credentials`; base filesystem Compose needs no S3 credential file. The untracked file has standard INI form:
-
-```ini
-[default]
-aws_access_key_id = REPLACE_WITH_EXTERNAL_ACCESS_KEY
-aws_secret_access_key = REPLACE_WITH_EXTERNAL_SECRET
-```
-
-The endpoint and region determine request routing/signing; no account, bucket, endpoint, or actual credentials are hardcoded. Do not use root storage credentials for the portal.
 
 ## Docker and Compose
 
@@ -280,28 +185,14 @@ The bare run is deliberately unconfigured. For live Compose:
 
 1. Copy `.env.example` to untracked `.env`, configure non-secret settings, and set `PORTAL_ENABLED=true` only when ready.
 2. Create untracked `secrets/oauth-client-secret` and `secrets/github-app.pem` with externally issued GitHub credentials. Restrict host permissions; Compose secrets must be readable by the non-root container user. No example secret is a usable credential.
-3. Keep `STORAGE_PROVIDER=FileSystem` for the default mounted-volume storage. S3 instead requires a private bucket, its restricted credentials in `secrets/s3-credentials`, and the S3 override command below.
+3. Keep `STORAGE_PROVIDER=FileSystem` for mounted-volume storage.
 4. Run `docker compose up --build -d`. Terminate HTTPS at your trusted ingress/reverse proxy, preserve the canonical `Host`, forward `X-Forwarded-Proto: https`, and configure the exact trusted proxy IP. The app's HTTP port is loopback-bound by default; adapt networking for your proxy without exposing it directly to the Internet.
 
-The `portal-data` volume preserves both filesystem approval state and cookie-encryption keys across container replacements. Provision writable `/data` ownership for UID 1654 when using a host bind mount (named volumes inherit the image directory ownership). Protect and back up this data: ledger loss removes approval evidence; key loss invalidates existing sessions, and key theft could allow cookie forgery. Files are not automatically encrypted at rest inside the Linux volume; use encrypted storage and tight filesystem access. S3 credentials, OAuth secrets, and App private keys must **not** share that volume or be stored in approval records.
-
-For an existing S3-compatible service, configure its `.env` settings and `secrets/s3-credentials`, then run:
-
-```powershell
-docker compose -f compose.yaml -f compose.s3.yaml up --build -d
-```
-
-For optional local S3-compatible development, `compose.minio.yaml` adds a MinIO backend:
-
-```powershell
-docker compose -f compose.yaml -f compose.minio.yaml up -d minio
-```
-
-Follow the [local storage provisioning steps](#start-local-s3-compatible-storage) to create the administrator credential files, private bucket matching `S3_BUCKET`, and restricted account in `secrets/s3-credentials`. Then start `portal` with the same two Compose files and the configured HTTPS ingress. The override explicitly permits storage HTTP **only for local development** and uses `http://minio:9000`. For the host-based `dotnet run` walkthrough use `http://localhost:9000` instead. The development image uses `latest` for convenience; pin a reviewed digest and use TLS for any shared environment. The backend is an optional dependency, not a second application/worker container.
+The `portal-data` volume preserves both filesystem approval state and cookie-encryption keys across container replacements. Provision writable `/data` ownership for UID 1654 when using a host bind mount (named volumes inherit the image directory ownership). Protect and back up this data: ledger loss removes approval evidence; key loss invalidates existing sessions, and key theft could allow cookie forgery. Files are not automatically encrypted at rest inside the Linux volume; use encrypted storage and tight filesystem access. OAuth secrets and App private keys must **not** share that volume or be stored in approval records.
 
 ## Storage integrity, durability and access
 
-Both backends store one ledger aggregate with ETag compare-and-swap: create only if absent, or update only when the expected version matches. Conflicts return an explicit failure, never an unconditional overwrite. A process-local gate serializes voting/polling; conditional storage protects against overlapping stale writers and reserves finalization before the GitHub call. Both backends run the conditional-write probe on first use.
+The ledger uses ETag compare-and-swap: create only if absent, or update only when the expected version matches. Conflicts return an explicit failure, never an unconditional overwrite. A process-local gate serializes voting/polling; conditional storage protects against overlapping stale writers and reserves finalization before the GitHub call. A conditional-write probe runs on first use.
 
 ### Filesystem
 
@@ -309,17 +200,11 @@ Both backends store one ledger aggregate with ETag compare-and-swap: create only
 
 Writes use a same-directory temporary file, flush the file to disk, then atomically replace the object. Cancellation before replacement leaves the original intact; malformed state blocks reads/writes rather than becoming an empty ledger. A process crash can leave an unused temporary file; only the named object is read. Review orphan temporary files only while stopped.
 
-Use a private, persistent **local filesystem** supporting exclusive locks and atomic same-directory rename; network shares, cloud-synced folders and active-active replicas are not supported. Filesystem permissions, disk reliability, backup/restore and crash/power-loss behavior must be validated on the deployment platform; this is not a distributed storage service. Corrupt state requires controlled recovery from backup, not deletion or an automatic switch to S3.
+Use a private, persistent **local filesystem** supporting exclusive locks and atomic same-directory rename; network shares, cloud-synced folders and active-active replicas are not supported. Filesystem permissions, disk reliability, backup/restore and crash/power-loss behavior must be validated on the deployment platform; this is not a distributed storage service. Corrupt state requires controlled recovery from backup, not deletion or an automatic storage change.
 
-### S3
+Administrators with filesystem access can alter evidence; application immutability is not tamper-proof WORM storage. Restrict operator access and retain audit history externally. Numeric actor IDs, login names and timestamps are audit data: apply your organization's retention/privacy rules.
 
-The object remains at `<prefix>ledger.json` in its existing format. Creation sends `If-None-Match: *`; updates send `If-Match` with the exact prior ETag. Automatic S3 write retries are disabled.
-
-At first use the app probes both failing conditional-create and failing conditional-update cases using a fixed `<prefix>conditional-write-probe.json`. **If the endpoint ignores either precondition, the integration fails closed**, without touching the actual ledger. The provider must offer strong read-after-write consistency, atomic conditional PUTs, durable writes, and ETags for GET/PUT. The probe detects basic unsupported behavior, not all distributed-storage consistency failures; validate your chosen provider. Do not place an eventually consistent cache or rewriting proxy in front of this bucket.
-
-Use a private bucket with TLS, encryption at rest, access logging, and versioning/backups. Grant the portal only GetObject/PutObject on its dedicated prefix (including the probe); no public access, listing, bucket administration, or delete permission is needed by the app. Avoid retention/legal-hold policies that prevent required conditional updates to the live ledger. Bucket administrators remain privileged and can alter evidence; application immutability is not tamper-proof WORM storage. Restrict operator access and retain version/audit history externally. Numeric actor IDs, login names and timestamps are audit data: apply your organization's retention/privacy rules.
-
-For either backend, the ledger is capped at **10,000 requests / 16 MiB** and read/written as a whole; exceeding limits stops writes explicitly. It is intentionally simple, not a high-throughput distributed database. Run **one replica** per storage location with one background worker. Conditional writes prevent lost updates/duplicate reservation across accidental overlapping instances, but there is no active-active scheduling or distributed leader election. Scale only after redesigning the storage protocol. Archive records under controlled maintenance after preserving audit backups; there is no automated retention deletion or in-place operator editor.
+The ledger is capped at **10,000 requests / 16 MiB** and read/written as a whole; exceeding limits stops writes explicitly. It is intentionally simple, not a high-throughput distributed database. Run **one replica** per storage location with one background worker. Conditional writes prevent lost updates/duplicate reservation across accidental overlapping instances, but there is no active-active scheduling or distributed leader election. Scale only after redesigning the storage protocol. Archive records under controlled maintenance after preserving audit backups; there is no automated retention deletion or in-place operator editor.
 
 ## Uncertain writes and operations
 
@@ -337,7 +222,7 @@ Sessions expire after four hours. POST votes and sign-out require ASP.NET antifo
 - GitHub's native quorum is **one**: this portal does not change it. Organization owners, security managers and other privileged/native reviewers can bypass or decide directly outside the bridge. Configure the native policy and restrict/govern these exceptions.
 - An approval may permit future commits with the **same secret**; this is not per-commit enforcement.
 - GitHub requests expire after **seven days**. Both native `expires_at` and the seven-day upper bound are enforced. The list's native `open` filter can include already approved requests waiting to push; the app inspects native responses and never re-approves them.
-- Native API actions are not transactional with either storage backend. There is an unavoidable interval between final GET and PATCH; a human can decide or dismiss a response during it. The bridge cannot prevent privileged out-of-band actions; conflicting/ambiguous results are held, not retried.
+- Native API actions are not transactional with local storage. There is an unavoidable interval between final GET and PATCH; a human can decide or dismiss a response during it. The bridge cannot prevent privileged out-of-band actions; conflicting/ambiguous results are held, not retried.
 
 ## Verification
 
@@ -349,8 +234,8 @@ docker compose config --quiet
 docker build -t customer-approval-portal .
 ```
 
-Tests cover quorum, identity binding, duplicate/self/unauthorized votes, eligibility changes, rejection, expiry, external decisions including approved-open responses, fresh rechecks, request identity changes, races, restart persistence, conditional creation/update conflicts, unsupported storage semantics, uncertain writes, and the HTTP/antiforgery surface. Filesystem tests use actual isolated temporary directories, including contention, corrupt state, cancellation and restart. GitHub/S3 protocol tests use fakes and do not claim live tenant/provider certification.
+Tests cover quorum, identity binding, duplicate/self/unauthorized votes, eligibility changes, rejection, expiry, external decisions including approved-open responses, fresh rechecks, request identity changes, races, restart persistence, conditional creation/update conflicts, unsupported storage semantics, uncertain writes, and the HTTP/antiforgery surface. Filesystem tests use actual isolated temporary directories, including contention, corrupt state, cancellation and restart. API protocol tests use fakes and do not claim live tenant certification.
 
-Before production, test GitHub OAuth, installation permissions, a real bypass/rejection, timeout reconciliation, storage preconditions/concurrent writes, encrypted backups/restores and TLS/proxy configuration in the actual target environment. No live GitHub tenant or S3 credentials are included. Docker/MinIO checks require an available Docker daemon.
+Before production, test GitHub OAuth, installation permissions, a real bypass/rejection, timeout reconciliation, storage preconditions/concurrent writes, encrypted backups/restores and TLS/proxy configuration in the actual target environment. No live GitHub tenant credentials are included. Container checks require an available Docker daemon.
 
 Official contracts consulted: [delegated-bypass REST](https://docs.github.com/en/enterprise-cloud@latest/rest/secret-scanning/delegated-bypass), [App review support and seven-day expiry](https://docs.github.com/en/code-security/concepts/secret-security/bypass-requests), [registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app), [GitHub App browser authorization](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app), and [installation tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).

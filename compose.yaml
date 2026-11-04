@@ -18,11 +18,7 @@ services:
       Portal__ApproverIds__1: "${APPROVER_ID_2:-0}"
       Portal__TrustedProxies__0: "${TRUSTED_PROXY_IP:-127.0.0.1}"
       Portal__PollSeconds: "${POLL_SECONDS:-60}"
-      Portal__S3Endpoint: "${S3_ENDPOINT:-}"
-      Portal__S3Region: "${S3_REGION:-us-east-1}"
-      Portal__S3Bucket: "${S3_BUCKET:-}"
-      Portal__S3Prefix: "${S3_PREFIX:-approval-portal/}"
-      Portal__S3ForcePathStyle: "${S3_PATH_STYLE:-true}"
+      Portal__DataDirectory: /data
     volumes:
       - portal-data:/data
     secrets:
