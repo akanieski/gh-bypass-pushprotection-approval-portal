@@ -1,0 +1,7 @@
+# Documentation for Inventory policy: https://eng.ms/docs/more/github-inside-microsoft/policies/inventory
+inventory:
+- source: DirectOwners
+  items:
+  - id: ankan@microsoft.com
+  - id: sc-ek5706218@microsoft.com
+  isProduction: false
