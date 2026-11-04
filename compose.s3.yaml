@@ -1,0 +1,10 @@
+services:
+  portal:
+    environment:
+      Portal__StorageProvider: S3
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/s3-credentials
+    secrets:
+      - s3-credentials
+secrets:
+  s3-credentials:
+    file: ./secrets/s3-credentials

@@ -16,6 +16,70 @@ namespace ApprovalPortal.Tests;
 
 public sealed class HttpTests
 {
+    [Theory]
+    [InlineData("FileSystem", typeof(FileSystemObjectStore))]
+    [InlineData("S3", typeof(S3ObjectStore))]
+    public async Task ConfiguredProviderIsResolvedWithoutContactingS3(string provider, Type expected)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "portal-provider-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("Portal:DataDirectory", directory);
+                builder.UseSetting("Portal:StorageProvider", provider);
+            });
+            Assert.IsType(expected, factory.Services.GetRequiredService<IObjectStore>());
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public async Task FileSystemCanEnableSignInWithoutAnyS3Settings()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "portal-ready-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var keyFile = Path.Combine(directory, "fixture.txt");
+        await File.WriteAllTextAsync(keyFile, "fixture, not a private key");
+        try
+        {
+            await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                foreach (var (key, value) in new Dictionary<string, string>
+                {
+                    ["DataDirectory"] = directory, ["Enabled"] = "true", ["PublicOrigin"] = "https://localhost",
+                    ["OAuthClientId"] = "fixture", ["OAuthClientSecret"] = "fixture",
+                    ["AppId"] = "1", ["InstallationId"] = "1", ["AppPrivateKeyFile"] = keyFile,
+                    ["Repositories:0"] = "example/repo", ["ApproverIds:0"] = "10", ["ApproverIds:1"] = "20"
+                }) builder.UseSetting("Portal:" + key, value);
+                builder.ConfigureServices(services => services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>());
+            });
+            using var client = factory.CreateClient(new() { AllowAutoRedirect = false, BaseAddress = new("https://localhost") });
+            Assert.IsType<FileSystemObjectStore>(factory.Services.GetRequiredService<IObjectStore>());
+            Assert.Contains("\"configured\":true", await client.GetStringAsync("/health"));
+            var signIn = await client.GetAsync("/login");
+            Assert.Equal(HttpStatusCode.Redirect, signIn.StatusCode);
+            Assert.Equal("github.com", signIn.Headers.Location!.Host);
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public async Task UnknownStorageProviderDoesNotFallBack()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "portal-invalid-provider-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("Portal:DataDirectory", directory);
+                builder.UseSetting("Portal:StorageProvider", "NotAProvider");
+            });
+            Assert.Throws<InvalidOperationException>(() => { _ = factory.Services; });
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
     [Fact]
     public async Task AuthenticatedPageHasWorkingDetailRouteAndVoteIgnoresPostedActorId()
     {
@@ -91,6 +155,7 @@ public sealed class HttpTests
         {
             await using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
                 builder.UseSetting("Portal:DataDirectory", directory));
+            Assert.IsType<FileSystemObjectStore>(factory.Services.GetRequiredService<IObjectStore>());
             using var client = factory.CreateClient(new() { AllowAutoRedirect = false });
             var health = await client.GetAsync("/health");
             Assert.Equal(HttpStatusCode.OK, health.StatusCode);

@@ -7,7 +7,7 @@ using Amazon.S3.Model;
 namespace ApprovalPortal;
 
 public sealed class StorageConflictException() : Exception("Approval state changed concurrently; reload and try again.");
-public sealed class StorageUnavailableException(string message) : Exception(message);
+public sealed class StorageUnavailableException(string message, Exception? inner = null) : Exception(message, inner);
 public sealed record StoredObject(string Body, string ETag);
 
 public interface IObjectStore
@@ -98,13 +98,13 @@ public sealed class Ledger(IObjectStore store)
         try
         {
             await store.PutAsync(probeKey, body, null, ct);
-            throw new StorageUnavailableException("S3 endpoint ignored If-None-Match. Live integration is blocked.");
+            throw new StorageUnavailableException("Storage backend ignored create-if-absent. Live integration is blocked.");
         }
         catch (StorageConflictException) { }
         try
         {
             await store.PutAsync(probeKey, body, "\"deliberately-invalid-portal-etag\"", ct);
-            throw new StorageUnavailableException("S3 endpoint ignored If-Match. Live integration is blocked.");
+            throw new StorageUnavailableException("Storage backend ignored the expected ETag. Live integration is blocked.");
         }
         catch (StorageConflictException) { }
         verified = true;

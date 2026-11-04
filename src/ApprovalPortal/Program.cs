@@ -85,7 +85,16 @@ builder.Services.Configure<ForwardedHeadersOptions>(forwarded =>
 });
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<Ledger>();
-builder.Services.AddSingleton<IObjectStore, S3ObjectStore>();
+builder.Services.AddSingleton<IObjectStore>(services =>
+{
+    var storage = services.GetRequiredService<PortalOptions>();
+    return storage.StorageProvider switch
+    {
+        StorageProvider.FileSystem => new FileSystemObjectStore(storage),
+        StorageProvider.S3 => new S3ObjectStore(storage),
+        _ => throw new InvalidOperationException("Portal:StorageProvider must be FileSystem or S3.")
+    };
+});
 builder.Services.AddSingleton<WorkerStatus>();
 builder.Services.AddHttpClient<IGitHubClient, GitHubClient>(client =>
 {

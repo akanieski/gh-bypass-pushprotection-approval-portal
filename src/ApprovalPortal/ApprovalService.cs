@@ -103,7 +103,8 @@ public sealed class ApprovalService(Ledger ledger, PortalOptions options, IGitHu
                     await ledger.SaveAsync(document, ct);
                 }
                 catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or GitHubApiException
-                    or JsonException or InvalidDataException or IOException or System.Security.Cryptography.CryptographicException)
+                    or JsonException or InvalidDataException or IOException or UnauthorizedAccessException
+                    or System.Security.Cryptography.CryptographicException)
                 {
                     fresh.State = "Uncertain";
                     fresh.Error = "Native write was not confirmed. No automatic retry; operator reconciliation required.";
@@ -169,7 +170,7 @@ public sealed class ApprovalWorker(ApprovalService approvals, PortalOptions opti
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
                 catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or GitHubApiException
-                    or JsonException or InvalidDataException or IOException or AmazonClientException
+                    or JsonException or InvalidDataException or IOException or UnauthorizedAccessException or AmazonClientException
                     or StorageConflictException or StorageUnavailableException
                     or System.Security.Cryptography.CryptographicException)
                 {

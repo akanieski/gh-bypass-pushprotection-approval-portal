@@ -112,7 +112,7 @@ else
             selected = records.SingleOrDefault(r => r.Native.Key == RequestKey);
         }
         catch (Exception ex) when (ex is Amazon.Runtime.AmazonClientException or StorageUnavailableException
-            or StorageConflictException or System.Text.Json.JsonException or IOException)
+            or StorageConflictException or System.Text.Json.JsonException or IOException or UnauthorizedAccessException)
         {
             loadError = "Approval records are unavailable. No votes can be submitted. Contact the portal operator and retry after storage is restored.";
             Logger.LogError("Approval ledger read failed; type {FailureType}.", ex.GetType().Name);

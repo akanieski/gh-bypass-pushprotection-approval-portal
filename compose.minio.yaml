@@ -2,9 +2,13 @@
 services:
   portal:
     environment:
+      Portal__StorageProvider: S3
+      AWS_SHARED_CREDENTIALS_FILE: /run/secrets/s3-credentials
       Portal__S3Endpoint: http://minio:9000
       Portal__S3AllowHttpForDevelopment: "true"
       Portal__S3ForcePathStyle: "true"
+    secrets:
+      - s3-credentials
   minio:
     image: quay.io/minio/minio:latest
     command: server /data --console-address ":9001"
@@ -20,6 +24,8 @@ services:
     volumes:
       - minio-data:/data
 secrets:
+  s3-credentials:
+    file: ./secrets/s3-credentials
   minio-root-user:
     file: ./secrets/minio-root-user
   minio-root-password:

@@ -1,9 +1,12 @@
 namespace ApprovalPortal;
 
+public enum StorageProvider { FileSystem, S3 }
+
 public sealed class PortalOptions
 {
     public bool Enabled { get; set; }
     public string DataDirectory { get; set; } = "data";
+    public StorageProvider StorageProvider { get; set; } = StorageProvider.FileSystem;
     public string PublicOrigin { get; set; } = "";
     public string OAuthClientId { get; set; } = "";
     public string OAuthClientSecret { get; set; } = "";
@@ -42,13 +45,18 @@ public sealed class PortalOptions
         if (ApproverIds.Distinct().Count() < 2 || ApproverIds.Any(id => id <= 0))
             errors.Add("Configure at least two distinct positive GitHub user IDs in Portal:ApproverIds.");
         if (PollSeconds is < 15 or > 3600) errors.Add("Portal:PollSeconds must be between 15 and 3600.");
-        if (!Uri.TryCreate(S3Endpoint, UriKind.Absolute, out var endpoint) ||
-            (endpoint.Scheme != "https" && !(S3AllowHttpForDevelopment && endpoint.Scheme == "http")) ||
-            !string.IsNullOrEmpty(endpoint.UserInfo) || !string.IsNullOrEmpty(endpoint.Query))
-            errors.Add("Configure Portal:S3Endpoint as HTTPS (HTTP requires the explicit development override).");
-        if (string.IsNullOrWhiteSpace(S3Bucket) || string.IsNullOrWhiteSpace(S3Region) ||
-            string.IsNullOrWhiteSpace(S3Prefix) || !S3Prefix.EndsWith('/') || S3Prefix.StartsWith('/'))
-            errors.Add("Configure S3 bucket, region and a non-root prefix ending in '/'.");
+        if (!Enum.IsDefined(StorageProvider))
+            errors.Add("Portal:StorageProvider must be FileSystem or S3.");
+        if (StorageProvider == StorageProvider.S3)
+        {
+            if (!Uri.TryCreate(S3Endpoint, UriKind.Absolute, out var endpoint) ||
+                (endpoint.Scheme != "https" && !(S3AllowHttpForDevelopment && endpoint.Scheme == "http")) ||
+                !string.IsNullOrEmpty(endpoint.UserInfo) || !string.IsNullOrEmpty(endpoint.Query))
+                errors.Add("Configure Portal:S3Endpoint as HTTPS (HTTP requires the explicit development override).");
+            if (string.IsNullOrWhiteSpace(S3Bucket) || string.IsNullOrWhiteSpace(S3Region) ||
+                string.IsNullOrWhiteSpace(S3Prefix) || !S3Prefix.EndsWith('/') || S3Prefix.StartsWith('/'))
+                errors.Add("Configure S3 bucket, region and a non-root prefix ending in '/'.");
+        }
         return errors.ToArray();
     }
 

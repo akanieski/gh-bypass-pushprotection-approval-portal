@@ -1,10 +1,10 @@
 # Customer Approval Portal
 
-Customer-hosted Blazor portal + polling worker in one container, with two-person approvals and S3-compatible state. Not a native GitHub feature.
+Customer-hosted Blazor portal + polling worker in one container, with two-person approvals. File system storage by default; S3 optional. Not a native GitHub feature.
 
 ## Get started locally
 
-Requires .NET 10 SDK, Docker Compose, MinIO Client (`mc.exe`), and GitHub CLI. Run commands from the repository root in PowerShell.
+Requires .NET 10 SDK and GitHub CLI. No Docker or storage service needed for local use. Run commands from the repository root in PowerShell.
 
 ### 1. Configure your GitHub App
 
@@ -16,11 +16,9 @@ Requires .NET 10 SDK, Docker Compose, MinIO Client (`mc.exe`), and GitHub CLI. R
 6. Save them as `secrets/oauth-client-secret` and `secrets/github-app.pem`. Keep credentials out of Git.
 7. Get each of your two reviewers' numeric IDs: `gh api users/LOGIN --jq .id`.
 
-### 2. Start local storage
+### 2. Choose storage
 
-Run the [MinIO provisioning commands](docs/setup-reference.md#start-local-s3-compatible-storage) to create the local bucket and restricted credentials in `secrets/s3-credentials`.
-
-Azure Blob Storage, Azure Storage Emulator, and Azurite are **not drop-in S3 replacements**. See [Azure storage compatibility](docs/setup-reference.md#azure-blob-storage-and-local-emulators).
+Use the default **FileSystem** provider, which saves approval state under `DataDirectory/approvals`. For S3/MinIO instead, follow [storage configuration](docs/setup-reference.md#storage-selection-and-switching).
 
 ### 3. Configure the portal
 
@@ -31,18 +29,13 @@ Replace the GitHub values below, including all three numeric `0` placeholders:
 {
   "Portal": {
     "Enabled": true,
+    "StorageProvider": "FileSystem",
     "PublicOrigin": "https://localhost:7443",
     "OAuthClientId": "YOUR_CLIENT_ID",
     "AppId": "YOUR_APP_ID",
     "InstallationId": 0,
     "Repositories": ["YOUR_ORG/YOUR_REPO"],
-    "ApproverIds": [0, 0],
-    "S3Endpoint": "http://localhost:9000",
-    "S3Region": "us-east-1",
-    "S3Bucket": "customer-approvals",
-    "S3Prefix": "approval-portal/",
-    "S3ForcePathStyle": true,
-    "S3AllowHttpForDevelopment": true
+    "ApproverIds": [0, 0]
   }
 }
 '@ | dotnet user-secrets set --project src\ApprovalPortal
@@ -52,7 +45,7 @@ Replace the GitHub values below, including all three numeric `0` placeholders:
 
 ```powershell
 $env:ASPNETCORE_ENVIRONMENT = 'Development'
-$env:AWS_SHARED_CREDENTIALS_FILE = (Resolve-Path .\secrets\s3-credentials).Path
+$env:Portal__DataDirectory = Join-Path (Get-Location) 'data'
 $env:Portal__OAuthClientSecretFile = (Resolve-Path .\secrets\oauth-client-secret).Path
 $env:Portal__AppPrivateKeyFile = (Resolve-Path .\secrets\github-app.pem).Path
 dotnet dev-certs https --trust
@@ -67,6 +60,8 @@ Have a third user create a delegated bypass request in the test repository. Wait
 
 ## Container deployment
 
-Configure `.env` from `.env.example`, create the three secret files, and run `docker compose up --build -d` behind HTTPS. Run only one app replica.
+Configure `.env` from `.env.example`, create the two GitHub secret files, and run `docker compose up --build -d` behind HTTPS. The `portal-data` volume preserves state. Run only one app replica.
+
+For S3, use `docker compose -f compose.yaml -f compose.s3.yaml up --build -d` with S3 settings and credentials. Switching providers does **not** migrate existing state.
 
 [Container setup, configuration, troubleshooting, and safety limits](docs/setup-reference.md#docker-and-compose) | [Design brief](docs/Two-Approver-Secret-Protection.html)
