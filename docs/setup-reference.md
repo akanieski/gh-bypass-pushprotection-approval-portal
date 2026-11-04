@@ -85,6 +85,19 @@ aws_secret_access_key = $portalSecretKey
 
 If any command fails, stop and resolve the error before continuing; do not enable the portal with partially provisioned storage. `mc` provisioning commands are for this private local development instance, not a way to pass production credentials. The optional MinIO console is `http://localhost:9001`. Never make the bucket public.
 
+### Azure Blob Storage and local emulators
+
+**Not directly supported by the current app.** Azure Blob containers are not S3 buckets. Neither Azure Blob Storage, the legacy Azure Storage Emulator, nor Azurite exposes the S3 API used by this application's AWS SDK.
+
+- Do not set `Portal:S3Endpoint` to `https://ACCOUNT.blob.core.windows.net` or a local emulator's Blob endpoint.
+- An Azure connection string, `UseDevelopmentStorage=true`, SAS token, or storage account key cannot replace the portal's S3 configuration/credentials.
+- To use an Azure Blob container directly, first add an Azure Blob implementation of `IObjectStore`, preserving atomic ETag updates and create-if-absent behavior. That backend and its Azure/emulator configuration are **not implemented** here.
+- An Azure-hosted service exposing a genuine S3 endpoint can use the existing S3 settings. An S3-to-Blob gateway is a separate dependency, not native Azure support; no such gateway has been validated for this app. It must preserve atomic conditional writes and strong consistency, not just translate basic GET/PUT requests.
+
+For the current implementation, use MinIO or another validated S3-compatible service. Do not disable the conditional-write safety checks to make an emulator or gateway appear compatible.
+
+References: [Azure Blob REST API](https://learn.microsoft.com/en-us/rest/api/storageservices/blob-service-rest-api), [Microsoft Q&A on S3 compatibility](https://learn.microsoft.com/en-us/answers/questions/1183760/s3-api-support-over-azure-blob-storage), and [Azurite](https://learn.microsoft.com/en-us/azure/storage/common/storage-use-azurite).
+
 ### Configure and run the local portal
 
 Complete the GitHub App setup below. Save its generated client secret in `secrets/oauth-client-secret` and its downloaded private key in `secrets/github-app.pem`. Keep the files untracked and restrict their filesystem permissions.

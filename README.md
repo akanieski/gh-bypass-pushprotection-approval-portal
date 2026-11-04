@@ -20,7 +20,7 @@ Requires .NET 10 SDK, Docker Compose, MinIO Client (`mc.exe`), and GitHub CLI. R
 
 Run the [MinIO provisioning commands](docs/setup-reference.md#start-local-s3-compatible-storage) to create the local bucket and restricted credentials in `secrets/s3-credentials`.
 
-Use MinIO, **not Azurite**: Azurite does not support S3.
+Azure Blob Storage, Azure Storage Emulator, and Azurite are **not drop-in S3 replacements**. See [Azure storage compatibility](docs/setup-reference.md#azure-blob-storage-and-local-emulators).
 
 ### 3. Configure the portal
 
