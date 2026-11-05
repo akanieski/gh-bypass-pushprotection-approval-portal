@@ -231,13 +231,13 @@ The `portal-data` volume preserves both filesystem approval state and cookie-enc
 
 ## Azure Container Apps
 
-[`infra/main.bicep`](../infra/main.bicep) is a resource-group-scoped deployment starting point: one Consumption Container App and environment, one Standard LRS storage account, and a 5-GiB Azure Files SMB share mounted at `/data`. Both the ledger and cookie keys persist. The private key uses a separate read-only secret volume at `/run/secrets/github-app.pem`. No registry, Key Vault, VNet, custom domain, backup policy, or Log Analytics workspace is provisioned.
+[`infra/main.bicep`](../infra/main.bicep) is a resource-group-scoped deployment starting point: one Basic Azure Container Registry, a user-assigned managed identity with registry-scoped `AcrPull`, one Consumption Container App and environment, one Standard LRS storage account, and a 5-GiB Azure Files SMB share mounted at `/data`. Both the ledger and cookie keys persist. The private key uses a separate read-only secret volume at `/run/secrets/github-app.pem`. Registry networking is public, but anonymous pulls and registry administrator credentials are disabled. No Key Vault, VNet, custom domain, backup policy, or Log Analytics workspace is provisioned.
 
-Build/publish the existing Docker image to a registry allowing anonymous pulls, preferably using an immutable digest. The template does not configure credentials for private registries. Supply these parameters through your protected deployment pipeline or a private parameter file **outside the repository**:
+First deploy without `image` to provision the registry, identity, environment, and storage. Build the existing Dockerfile using `az acr build` and the output `registryName`; the build context must exclude local credentials and state. Then redeploy with the built image's immutable digest from the output `registryLoginServer`. The Container App authenticates to this registry using managed identity, without registry passwords. Supply these parameters through your protected deployment pipeline or a private parameter file **outside the repository**:
 
 | Parameter | Value |
 |---|---|
-| `image` | Published container image reference. |
+| `image` | Optional image reference. Empty provisions infrastructure only; supplying the image deploys the Container App. Prefer a digest in the provisioned registry. |
 | `githubHost` | Hostname only; defaults to `github.com`. |
 | `githubAppId`, `githubInstallationId`, `githubOAuthClientId` | Your GitHub App settings. |
 | `repository` | Optional bootstrap `owner/repo`; required in effective configuration, alternatively supplied through `Repositories` in JSON. |
@@ -252,18 +252,19 @@ After you have authorized deployment and selected the subscription/resource grou
 
 ```powershell
 az bicep build --file .\infra\main.bicep --outfile "$env:TEMP\approval-portal-template.json"
+az deployment group what-if --resource-group YOUR_RESOURCE_GROUP --template-file .\infra\main.bicep --parameters '@C:\secure\approval-portal.parameters.json'
 az deployment group create --resource-group YOUR_RESOURCE_GROUP --template-file .\infra\main.bicep --parameters '@C:\secure\approval-portal.parameters.json'
 ```
 
-Do not pass plaintext secrets on the command line or commit parameter files. The template stores credentials as Container Apps secrets, not in the image/state share, and outputs only the portal/callback URLs. Operators with deployment/app administrative access can still access these secrets. Register the output `oauthCallbackUrl` in the GitHub App and set its homepage to the portal origin before signing in.
+After the infrastructure deployment, run `az acr build --registry YOUR_REGISTRY --image approval-portal:YOUR_TAG .`, set `image` in the protected parameter file to the resulting digest reference, preview again, and redeploy. The deployment principal needs permission to create the registry-scoped role assignment. Do not pass plaintext secrets on the command line or commit parameter files. The template stores credentials as Container Apps secrets, not in the image/state share, and outputs registry names and portal/callback URLs only. Operators with deployment/app administrative access can still access these secrets. Register the output `oauthCallbackUrl` in the GitHub App and set its homepage to the portal origin before signing in.
 
 Ingress permits external HTTPS only and targets container HTTP port 8080. The template enables ASP.NET's forwarded-header integration for ACA's TLS-terminating ingress. This trusts forwarded headers rather than fixed proxy IPs: keep the app reachable only through the managed ingress, preserve its original Host, and do not reuse that setting on an unprotected Docker HTTP listener. Verify sign-in redirects use the output HTTPS origin and configured GitHub host.
 
-The Azure Files mount uses the storage account key via an environment storage definition; shared-key access is intentionally enabled for this small stable-API template. It does not output the key. Restrict storage/control-plane access and plan key rotation, backups, retention, and recovery. Storage service encryption at rest is enabled by Azure; cookie keys are not separately application-encrypted on the share. UID/GID 1654 and restrictive file modes allow the non-root image user to write state; custom images must preserve that UID or adapt the mount. Do not add `nobrl`, which can weaken required file locking.
+The Azure Files mount uses the storage account key via an environment storage definition; shared-key access is intentionally enabled for this small stable-API template. It does not output the key. Restrict storage/control-plane access and plan key rotation, backups, retention, and recovery. Storage service encryption at rest is enabled by Azure; cookie keys are not separately application-encrypted on the share. UID/GID 1654, restrictive file modes, and `cache=strict` allow the non-root image user to write state. Custom images must preserve that UID or adapt the mount. ACA rejects the `actimeo` mount option. Do not add `nobrl`, which can weaken required file locking.
 
 Min/max replicas are both one, and revision mode is Single. **Single mode does not guarantee no overlap during a rolling update.** For maintenance, stop/deactivate the running revision and confirm its worker has exited before starting a replacement against the same share; accept downtime. Do not run another portal against this share.
 
-Before production, validate `/health`, successful GitHub polling, OAuth, two votes/one native review, ledger/cookie persistence across replacement, and backup restoration in your actual ACA environment. **Local filesystem tests and Bicep compilation do not certify Azure Files locking, conditional writes, flush, and atomic rename behavior.** Test cross-process exclusive-lock contention and stale-version rejection on the mounted share; do not enable real approvals if those checks fail. This template has not been live-deployed or platform-certified.
+Before production, validate `/health`, successful GitHub polling, OAuth, the configured quorum/one native review, ledger/cookie persistence across replacement, and backup restoration in your actual ACA environment. **Local filesystem tests and Bicep compilation do not certify Azure Files locking, conditional writes, flush, and atomic rename behavior.** Startup performs create-if-absent and stale-ETag rejection probes on the mounted share. Also test cross-process exclusive-lock contention and recovery; do not enable real approvals if those checks fail. Successful deployment and startup checks are not complete platform certification.
 
 The environment selects Azure Monitor logging; add a diagnostic setting/destination for retained production logs (not included). See [ACA storage mounts](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts).
 

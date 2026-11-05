@@ -85,6 +85,6 @@ Configure `.env` from `.env.example`, including `GITHUB_OAUTH_SECRET`, save the 
 
 ## Azure Container Apps
 
-[infra/main.bicep](infra/main.bicep) creates one Container App, its environment, and an Azure Files share mounted at `/data` for approval state and cookie keys. Credentials use Container Apps secrets; the PEM is mounted separately. Supply an already-published publicly pullable image. No Azure deployment is performed automatically.
+[infra/main.bicep](infra/main.bicep) creates a Basic Azure Container Registry, a managed identity with registry-scoped image-pull permission, one public HTTPS Container App, its environment, and an Azure Files share mounted at `/data` for approval state and cookie keys. Registry networking is public, but image pulls require authentication; administrator credentials and anonymous pulls are disabled. Credentials use Container Apps secrets; the PEM is mounted separately. Deploy once without `image` to provision infrastructure, build the existing Dockerfile in ACR, then redeploy with the image digest. No Azure deployment is performed automatically.
 
 See [deployment parameters, HTTPS, storage validation, and upgrade precautions](docs/setup-reference.md#azure-container-apps).

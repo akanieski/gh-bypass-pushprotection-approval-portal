@@ -8,8 +8,8 @@ param location string = resourceGroup().location
 @description('Organization label shown before Bypass Push Protection Approvals.')
 param organizationSlug string = 'Customer'
 
-@description('Published image accessible without registry credentials. Prefer an immutable digest.')
-param image string
+@description('Image reference, preferably an immutable digest. Leave empty to provision infrastructure before building the image in ACR.')
+param image string = ''
 param githubHost string = 'github.com'
 param githubAppId string
 param githubInstallationId int
@@ -32,6 +32,36 @@ param teamsWebhookUrl string = ''
 @minValue(5)
 @maxValue(3600)
 param pollSeconds int = 60
+
+resource registry 'Microsoft.ContainerRegistry/registries@2025-11-01' = {
+  name: 'acr${uniqueString(resourceGroup().id, name)}'
+  location: location
+  sku: {
+    name: 'Basic'
+  }
+  properties: {
+    adminUserEnabled: false
+    anonymousPullEnabled: false
+    publicNetworkAccess: 'Enabled'
+    roleAssignmentMode: 'LegacyRegistryPermissions'
+  }
+}
+
+resource pullIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2024-11-30' = {
+  name: '${name}-pull'
+  location: location
+}
+
+var acrPullRoleId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
+resource pullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  scope: registry
+  name: guid(registry.id, pullIdentity.id, acrPullRoleId)
+  properties: {
+    principalId: pullIdentity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: acrPullRoleId
+  }
+}
 
 resource storage 'Microsoft.Storage/storageAccounts@2025-01-01' = {
   name: 'ap${uniqueString(resourceGroup().id, name)}'
@@ -114,9 +144,18 @@ var environmentVariables = [for setting in items(settings): {
   value: setting.value
 }]
 
-resource app 'Microsoft.App/containerApps@2025-01-01' = {
+resource app 'Microsoft.App/containerApps@2025-01-01' = if (!empty(image)) {
   name: name
   location: location
+  identity: {
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${pullIdentity.id}': {}
+    }
+  }
+  dependsOn: [
+    pullRole
+  ]
   properties: {
     managedEnvironmentId: environment.id
     workloadProfileName: 'Consumption'
@@ -128,6 +167,12 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
         targetPort: 8080
         transport: 'http'
       }
+      registries: [
+        {
+          server: registry.properties.loginServer
+          identity: pullIdentity.id
+        }
+      ]
       secrets: concat([
         {
           name: 'oauth-secret'
@@ -200,7 +245,7 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
           name: 'state'
           storageType: 'AzureFile'
           storageName: environmentStorage.name
-          mountOptions: 'uid=1654,gid=1654,dir_mode=0700,file_mode=0600,cache=strict,actimeo=0'
+          mountOptions: 'uid=1654,gid=1654,dir_mode=0700,file_mode=0600,cache=strict'
         }
         {
           name: 'credentials'
@@ -217,5 +262,7 @@ resource app 'Microsoft.App/containerApps@2025-01-01' = {
   }
 }
 
-output portalUrl string = '${publicOrigin}/approvals'
-output oauthCallbackUrl string = '${publicOrigin}/signin-github'
+output registryName string = registry.name
+output registryLoginServer string = registry.properties.loginServer
+output portalUrl string = empty(image) ? '' : '${publicOrigin}/approvals'
+output oauthCallbackUrl string = empty(image) ? '' : '${publicOrigin}/signin-github'
