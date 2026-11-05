@@ -4,6 +4,20 @@ Extend GitHub push protection with a lightweight, open-source portal that requir
 
 A .NET 10 / Blazor example that collects multiple approvals before submitting one native GitHub push-protection bypass review. The quorum defaults to two. This is a custom integration, not a native GitHub feature.
 
+## Portal experience
+
+**Empty queue.** Signed-in users see when there are no pending requests visible to them.
+
+![Pending approvals page with no requests awaiting review](docs/images/portal-empty-queue.png)
+
+**Pending request.** Each card shows the requester, approval count, expiry, and a link to review.
+
+![Pending bypass request showing zero of two required approvals and a Review request button](docs/images/portal-pending-request.png)
+
+**Review page.** Reviewers inspect request details, detected-secret metadata, and comments before approving or denying.
+
+![Bypass request detail page with request context, approval history, and deny and approve buttons](docs/images/portal-review-request.png)
+
 ## Run locally
 
 Requires the .NET 10 SDK, a GitHub App, and a test repository with delegated bypass enabled.
