@@ -1,0 +1,66 @@
+@page "/settings"
+@inject ApprovalService Approvals
+@inject ILogger<Settings> Logger
+
+<div class="page-heading"><h1>Settings</h1><p class="muted">Manage the company name and approval policy.</p></div>
+<nav class="back-link" aria-label="Breadcrumb"><a href="/approvals">&larr; Back to Pending Approvals</a></nav>
+@if (Saved) { <p class="notice" role="status">Settings saved. Changes apply immediately, including to pending requests.</p> }
+@if (actor is null)
+{
+    <p>Sign in with an eligible GitHub approver account to manage settings.</p>
+    <a class="button" href="/login">Sign in with GitHub</a>
+}
+else if (error is not null)
+{
+    <p class="error" role="alert">@error</p>
+}
+else if (settings is not null)
+{
+    <section class="review-panel">
+        <h2>Approval policy</h2>
+        <p class="notice">Any current approver can change these settings. Changes affect pending requests immediately and can cause them to reach quorum on the next worker poll.</p>
+        <form class="settings-form" method="post" action="/settings/save">
+            <AntiforgeryToken />
+            <input type="hidden" name="version" value="@settings.Version" />
+            <label for="company-name">Company name</label>
+            <input id="company-name" name="organizationSlug" value="@settings.OrganizationSlug" required />
+            <label id="approver-ids-label" for="approver-ids">GitHub approvers</label>
+            <input id="approver-ids" name="approverIdsCsv" value="@settings.ApproverIdsCsv" aria-describedby="approver-help" required />
+            <p id="approver-help" class="muted">Comma-separated numeric GitHub user IDs. Enable JavaScript to search for people instead.</p>
+            <div id="approver-picker" hidden>
+                <label for="approver-search">GitHub approvers</label>
+                <p id="picker-help" class="muted">Search by GitHub username or name on this portal's GitHub host, then select people to add. Removing yourself removes your access to Settings. Changes are not applied until you save.</p>
+                <ul id="selected-approvers" class="people-list" aria-label="Selected approvers"></ul>
+                <input id="approver-search" type="search" autocomplete="off" maxlength="80" aria-describedby="picker-help picker-status" placeholder="Search GitHub users" />
+                <p id="picker-status" class="muted" role="status" aria-live="polite"></p>
+                <ul id="approver-results" class="people-list" aria-label="Matching GitHub users"></ul>
+            </div>
+            <label for="required-approvals">Required approvals</label>
+            <input id="required-approvals" type="number" name="requiredApprovals" min="2" step="1" value="@settings.RequiredApprovals" required />
+            <p class="muted">At least two, and no greater than the number of configured approvers. Requesters cannot approve their own requests. Removed approvers no longer count toward quorum; existing rejections remain blocking.</p>
+            <button type="submit">Save settings</button>
+        </form>
+        <p class="muted fine-print">Saved in config.json on the persistent data volume, overriding environment settings. Secrets and GitHub App credentials are never saved here. Manual file edits require a service restart.</p>
+    </section>
+    <script src="/approver-picker.js" defer></script>
+}
+
+@code {
+    [CascadingParameter] private Task<AuthenticationState> AuthenticationState { get; set; } = default!;
+    [SupplyParameterFromQuery(Name = "saved")] public bool Saved { get; set; }
+    private Actor? actor;
+    private PortalSettingsView? settings;
+    private string? error;
+    protected override async Task OnParametersSetAsync()
+    {
+        actor = Actor.FromPrincipal((await AuthenticationState).User);
+        if (actor is null) return;
+        try { settings = await Approvals.SettingsAsync(actor); }
+        catch (SettingsAccessException) { error = "Only current approvers may view or change these settings."; }
+        catch (Exception ex) when (ex is StorageUnavailableException or StorageConflictException or IOException or UnauthorizedAccessException)
+        {
+            error = "Settings are unavailable. Contact the portal operator.";
+            Logger.LogError("Settings read failed; type {FailureType}.", ex.GetType().Name);
+        }
+    }
+}

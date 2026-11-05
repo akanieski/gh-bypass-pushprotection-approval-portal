@@ -4,10 +4,43 @@ using Amazon.Runtime;
 namespace ApprovalPortal;
 
 public sealed class ApprovalService(Ledger ledger, PortalOptions options, IGitHubClient github,
-    TimeProvider clock, ILogger<ApprovalService> logger)
+    TimeProvider clock, ILogger<ApprovalService> logger, IApprovalNotifier notifier, PortalSettingsStore settingsStore)
 {
     private readonly SemaphoreSlim gate = new(1, 1);
     private DateTimeOffset Now => clock.GetUtcNow();
+
+    public async Task<PortalSettingsView> SettingsAsync(Actor actor, CancellationToken ct = default)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (!options.Eligible(actor.Id)) throw new SettingsAccessException();
+            return new(options.OrganizationSlug ?? "Customer",
+                options.ApproverIdsCsv ?? string.Join(',', options.ApproverIds), options.RequiredApprovals, settingsStore.Version);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task SaveSettingsAsync(Actor actor, string organizationSlug, string approverIdsCsv,
+        int requiredApprovals, string version, CancellationToken ct = default)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (!options.Eligible(actor.Id)) throw new SettingsAccessException();
+            if (string.IsNullOrWhiteSpace(organizationSlug))
+                throw new SettingsValidationException("Company name is required.");
+            var policy = new ApprovalPolicy(organizationSlug.Trim(), [], approverIdsCsv.Trim(), requiredApprovals);
+            var candidate = options.WithPolicy(policy);
+            var problems = candidate.PolicyProblems();
+            if (problems.Length > 0) throw new SettingsValidationException(string.Join(" ", problems));
+            await settingsStore.SavePolicyAsync(policy, version, ct);
+            options.ApplyPolicy(policy);
+            logger.LogInformation("Approval settings changed by GitHub user ID {ActorId}; required approvals {RequiredApprovals}.",
+                actor.Id, requiredApprovals);
+        }
+        finally { gate.Release(); }
+    }
 
     public async Task<List<RequestRecord>> VisibleAsync(Actor actor, CancellationToken ct = default)
     {
@@ -33,9 +66,29 @@ public sealed class ApprovalService(Ledger ledger, PortalOptions options, IGitHu
                 throw new VoteException("This request is no longer available for voting.");
             if (Now - record.ObservedAt > TimeSpan.FromMinutes(5))
                 throw new VoteException("GitHub state is stale. Wait for a successful worker poll.");
-            if (record.Votes.Any(v => v.ActorId == actor.Id)) throw new VoteException("Your immutable vote is already recorded.");
+            if (record.Votes.Any(v => v.ActorId == actor.Id)) throw new VoteException("Your vote is already recorded. Use Undo approval if it is still available.");
             if (record.Votes.Any(v => !v.Approve)) throw new VoteException("A rejection has already blocked approval.");
             record.Votes.Add(new(actor.Id, actor.Login, approve, Now));
+            await ledger.SaveAsync(document, ct);
+        }
+        finally { gate.Release(); }
+    }
+
+    public async Task UndoApprovalAsync(string key, Actor actor, CancellationToken ct = default)
+    {
+        await gate.WaitAsync(ct);
+        try
+        {
+            if (!options.Ready) throw new VoteException("Live approval is unavailable. Check portal configuration.");
+            var document = await ledger.LoadAsync(ct);
+            var record = document.Requests.SingleOrDefault(r => r.Native.Key == key);
+            if (record is null || !options.Includes(record.Native.Repository))
+                throw new VoteException("Request not found.");
+            var now = Now;
+            if (!record.CanUndoApproval(actor, options, now))
+                throw new VoteException("You can only undo your own sole approval on a fresh, pending request before another decision or finalization.");
+            record.ApprovalWithdrawals.Add(new(record.Votes[0], now));
+            record.Votes.Clear();
             await ledger.SaveAsync(document, ct);
         }
         finally { gate.Release(); }
@@ -79,7 +132,7 @@ public sealed class ApprovalService(Ledger ledger, PortalOptions options, IGitHu
                     continue;
                 }
                 var decision = record.Votes.Any(v => !v.Approve) ? "reject"
-                    : record.Approvals(options) >= 2 ? "approve" : null;
+                    : record.Approvals(options) >= options.RequiredApprovals ? "approve" : null;
                 if (decision is null) continue;
 
                 var current = await github.GetAsync(record.Native.Repository, record.Native.Number, ct);
@@ -115,8 +168,38 @@ public sealed class ApprovalService(Ledger ledger, PortalOptions options, IGitHu
                     throw;
                 }
             }
+            if (options.TeamsWebhookUrl.Length > 0)
+                await NotifyPendingAsync(document, ct);
         }
         finally { gate.Release(); }
+    }
+
+    private async Task NotifyPendingAsync(LedgerDocument document, CancellationToken ct)
+    {
+        foreach (var record in document.Requests.Where(r => options.Includes(r.Native.Repository) &&
+            r.State == "Pending" && r.Native.IsPending(Now) && !r.Votes.Any(v => !v.Approve) &&
+            Now - r.ObservedAt <= TimeSpan.FromMinutes(5) &&
+            r.NotificationSentAt is null && (r.NotificationRetryAt is null || r.NotificationRetryAt <= Now)))
+        {
+            try
+            {
+                await notifier.NotifyNewRequestAsync(record.Native, ct);
+                record.NotificationSentAt = Now;
+                record.NotificationRetryAt = null;
+                record.NotificationFailures = 0;
+                record.NotificationError = null;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException)
+            {
+                record.NotificationFailures = Math.Clamp(record.NotificationFailures, 0, 5) + 1;
+                record.NotificationRetryAt = Now.AddSeconds(30 * Math.Pow(2, record.NotificationFailures));
+                record.NotificationError = "Teams notification failed. Retries continue while pending; approval processing remains enabled.";
+                logger.LogWarning("Teams notification failed for {RequestKey}; type {FailureType}; retry at {RetryAt}.",
+                    record.Native.Key, ex.GetType().Name, record.NotificationRetryAt);
+            }
+            await ledger.SaveAsync(document, ct);
+        }
     }
 
     private static void EnsureKey(RequestRecord record, NativeRequest native)
@@ -158,7 +241,7 @@ public sealed class ApprovalWorker(ApprovalService approvals, PortalOptions opti
         var failures = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
-            var delay = TimeSpan.FromSeconds(Math.Clamp(options.PollSeconds, 15, 3600));
+            var delay = TimeSpan.FromSeconds(Math.Clamp(options.PollSeconds, 5, 3600));
             if (options.Ready)
             {
                 try
@@ -179,8 +262,13 @@ public sealed class ApprovalWorker(ApprovalService approvals, PortalOptions opti
                     if (ex is GitHubApiException api && api.RetryAt - DateTimeOffset.UtcNow > delay)
                         delay = api.RetryAt - DateTimeOffset.UtcNow;
                     status.Error = "GitHub or approval-storage synchronization failed. Approval is fail-closed; consult operator logs.";
-                    logger.LogError("Approval synchronization failed; type {FailureType}; retry in {Seconds}s.",
-                        ex.GetType().Name, delay.TotalSeconds);
+                    if (ex is GitHubApiException failure)
+                        logger.LogError("Approval synchronization failed; GitHub HTTP {StatusCode}; {Method} {Endpoint}; accepted permissions: {AcceptedPermissions}; rate limit remaining: {RateLimitRemaining}; retry in {Seconds}s.",
+                            (int)failure.Status, failure.Method, failure.Endpoint,
+                            failure.AcceptedPermissions, failure.RateLimitRemaining, delay.TotalSeconds);
+                    else
+                        logger.LogError("Approval synchronization failed; type {FailureType}; retry in {Seconds}s.",
+                            ex.GetType().Name, delay.TotalSeconds);
                 }
             }
             try { await Task.Delay(delay, stoppingToken); }

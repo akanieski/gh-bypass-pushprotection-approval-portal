@@ -6,23 +6,25 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       Portal__Enabled: "${PORTAL_ENABLED:-false}"
+      Portal__OrganizationSlug: "${PORTAL_ORGANIZATION_SLUG:-Customer}"
       Portal__StorageProvider: "${STORAGE_PROVIDER:-FileSystem}"
       Portal__PublicOrigin: "${PORTAL_PUBLIC_ORIGIN:-}"
+      Portal__GitHubHost: "${GITHUB_HOST:-github.com}"
       Portal__OAuthClientId: "${GITHUB_OAUTH_CLIENT_ID:-}"
-      Portal__OAuthClientSecretFile: /run/secrets/oauth-client-secret
+      Portal__OAuthClientSecret: "${GITHUB_OAUTH_SECRET:-}"
       Portal__AppId: "${GITHUB_APP_ID:-}"
       Portal__InstallationId: "${GITHUB_INSTALLATION_ID:-0}"
       Portal__AppPrivateKeyFile: /run/secrets/github-app-key
       Portal__Repositories__0: "${GITHUB_REPOSITORY:-}"
-      Portal__ApproverIds__0: "${APPROVER_ID_1:-0}"
-      Portal__ApproverIds__1: "${APPROVER_ID_2:-0}"
+      Portal__ApproverIdsCsv: "${APPROVER_IDS:-${APPROVER_ID_1:-0},${APPROVER_ID_2:-0}}"
+      Portal__RequiredApprovals: "${REQUIRED_APPROVALS:-2}"
+      Portal__TeamsWebhookUrl: "${TEAMS_WEBHOOK_URL:-}"
       Portal__TrustedProxies__0: "${TRUSTED_PROXY_IP:-127.0.0.1}"
       Portal__PollSeconds: "${POLL_SECONDS:-60}"
       Portal__DataDirectory: /data
     volumes:
       - portal-data:/data
     secrets:
-      - oauth-client-secret
       - github-app-key
     read_only: true
     tmpfs:
@@ -32,8 +34,6 @@ services:
     cap_drop:
       - ALL
 secrets:
-  oauth-client-secret:
-    file: ./secrets/oauth-client-secret
   github-app-key:
     file: ./secrets/github-app.pem
 volumes:

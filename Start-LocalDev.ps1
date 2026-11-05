@@ -46,11 +46,17 @@ foreach ($line in Get-Content -LiteralPath $EnvFile) {
 
 $mapping = @{
     PORTAL_ENABLED = 'Portal__Enabled'
+    PORTAL_ORGANIZATION_SLUG = 'Portal__OrganizationSlug'
     STORAGE_PROVIDER = 'Portal__StorageProvider'
+    GITHUB_HOST = 'Portal__GitHubHost'
     GITHUB_OAUTH_CLIENT_ID = 'Portal__OAuthClientId'
+    GITHUB_OAUTH_SECRET = 'Portal__OAuthClientSecret'
     GITHUB_APP_ID = 'Portal__AppId'
     GITHUB_INSTALLATION_ID = 'Portal__InstallationId'
     GITHUB_REPOSITORY = 'Portal__Repositories__0'
+    APPROVER_IDS = 'Portal__ApproverIdsCsv'
+    REQUIRED_APPROVALS = 'Portal__RequiredApprovals'
+    TEAMS_WEBHOOK_URL = 'Portal__TeamsWebhookUrl'
     APPROVER_ID_1 = 'Portal__ApproverIds__0'
     APPROVER_ID_2 = 'Portal__ApproverIds__1'
     TRUSTED_PROXY_IP = 'Portal__TrustedProxies__0'
@@ -66,10 +72,14 @@ foreach ($name in $mapping.Keys) {
     if ($values.ContainsKey($name)) { $environment[$mapping[$name]] = $values[$name] }
 }
 # Compose's public origin and secret mount paths are replaced for this local process.
+if (-not $values.ContainsKey('GITHUB_OAUTH_SECRET') -or
+    [string]::IsNullOrWhiteSpace($values['GITHUB_OAUTH_SECRET'])) {
+    throw "GITHUB_OAUTH_SECRET is required in $EnvFile. Set it to your GitHub App client secret; never commit this file."
+}
+$environment['Portal__OAuthClientSecretFile'] = ''
 $environment['Portal__PublicOrigin'] = $Url.TrimEnd('/')
 $environment['Portal__DataDirectory'] = Join-Path $PSScriptRoot 'data'
 $secrets = @{
-    Portal__OAuthClientSecretFile = 'secrets\oauth-client-secret'
     Portal__AppPrivateKeyFile = 'secrets\github-app.pem'
 }
 foreach ($name in $secrets.Keys) {

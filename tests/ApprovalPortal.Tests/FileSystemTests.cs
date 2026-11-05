@@ -160,12 +160,23 @@ public sealed class FileSystemTests : IDisposable
             Request = new(101, 42, "example/repo", new(99, "requester"), clock.GetUtcNow().AddHours(-1),
                 clock.GetUtcNow().AddDays(6), "pending", [], "https://github.com/example/repo/security/secret-scanning/bypass-requests/42")
         };
-        ApprovalService Restart() => new(new Ledger(Store()), options, github, clock, NullLogger<ApprovalService>.Instance);
+        ApprovalService Restart()
+        {
+            var settings = new PortalSettingsStore(options);
+            settings.LoadInto(options);
+            return new(new Ledger(Store()), options, github, clock, NullLogger<ApprovalService>.Instance, new FakeNotifier(), settings);
+        }
         var service = Restart();
         await service.SynchronizeAsync(CancellationToken.None);
         await service.VoteAsync(github.Request.Key, new(10, "first"), true);
         service = Restart();
         Assert.Equal(10, Assert.Single(Assert.Single(await service.VisibleAsync(new(20, "second"))).Votes).ActorId);
+        await service.UndoApprovalAsync(github.Request.Key, new(10, "first"));
+        service = Restart();
+        var withdrawn = Assert.Single(await service.VisibleAsync(new(20, "second")));
+        Assert.Empty(withdrawn.Votes);
+        Assert.Equal(10, Assert.Single(withdrawn.ApprovalWithdrawals).Approval.ActorId);
+        await service.VoteAsync(github.Request.Key, new(10, "first"), true);
         await service.VoteAsync(github.Request.Key, new(20, "second"), true);
         await service.SynchronizeAsync(CancellationToken.None);
         await Restart().SynchronizeAsync(CancellationToken.None);

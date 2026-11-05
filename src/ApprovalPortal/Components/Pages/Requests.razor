@@ -8,8 +8,15 @@
 @inject ILogger<Requests> Logger
 @inject TimeProvider Clock
 
-<h1>@(RequestKey is null ? "Pending approvals" : "Review bypass request")</h1>
-@if (Recorded) { <p role="status" class="notice">Your immutable vote has been recorded. The next successful worker poll rechecks GitHub before any native decision.</p> }
+<div class="page-heading">
+    <div class="protection-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 3 4 6v6c0 4 4 7 8 9 4-2 8-5 8-9V6Z" /><path d="M12 7v6m0 3v1" /></svg>
+    </div>
+    <h1>@(RequestKey is null ? "Pending approvals" : "Push was blocked by secret scanning")</h1>
+    <p class="muted">@(RequestKey is null ? "Review push-protection bypass requests across your monitored repositories." : $"Review bypass request. {Options.RequiredApprovals} independent approvals are required.")</p>
+</div>
+@if (Recorded) { <p role="status" class="notice">Your vote has been recorded. You may undo your own approval while it is the only decision on a fresh, pending request. The next successful worker poll rechecks GitHub before any native decision.</p> }
+@if (Undone) { <p role="status" class="notice">Your approval has been withdrawn and no longer counts toward the quorum. The withdrawal remains in the audit history.</p> }
 @if (AuthError)
 {
     <p role="alert" class="error">GitHub sign-in failed. Try again or contact the portal operator.</p>
@@ -22,7 +29,7 @@
     </section>
 }
 @if (Worker.Error is not null) { <p role="alert" class="error">@Worker.Error</p> }
-<p>Last successful synchronization: @(Worker.LastSuccessfulPoll?.ToString("u") ?? "Not yet completed"). Refresh this page to see new status.</p>
+<p class="sync-status">Last successful synchronization: @(Worker.LastSuccessfulPoll?.ToString("u") ?? "Not yet completed"). <a href="@(RequestKey is null ? "/approvals" : selected?.Native.PortalPath ?? "/approvals")">Refresh status</a></p>
 @if (actor is null)
 {
     <p>Create the native bypass request in GitHub first, then sign in to find it here. The organization resource link is a static entry point, not a request submission form.</p>
@@ -30,9 +37,6 @@
 }
 else
 {
-    <div class="session"><span>Signed in as <strong>@actor.Login</strong> (GitHub ID @actor.Id).</span>
-        <form method="post" action="/logout"><AntiforgeryToken /><button>Sign out</button></form>
-    </div>
     @if (!Options.Eligible(actor.Id)) { <p>You may view your own requests, but only configured approvers may vote.</p> }
     @if (loadError is not null)
     {
@@ -40,14 +44,22 @@ else
     }
     else if (RequestKey is null)
     {
-        <p>Two distinct eligible people, excluding the requester, must approve. Any accepted rejection blocks approval. Review the secret context in GitHub, not here.</p>
-        @if (records.Count == 0) { <p>No pending approvals visible to you. The worker polls configured repositories; you can see your own pending requests or, as an eligible approver, all monitored pending requests.</p> }
+        <p class="list-intro">@Options.RequiredApprovals distinct eligible people, excluding the requester, must approve. Any accepted rejection blocks approval.</p>
+        @if (records.Count == 0) { <section class="empty-state"><h2>You're all caught up</h2><p>No pending approvals visible to you. The worker polls configured repositories; you can see your own pending requests or, as an eligible approver, all monitored pending requests.</p></section> }
         @foreach (var record in records)
         {
-            <article>
-                <h2><a href="@PortalLink(record)">@record.Native.Repository #@record.Native.Number</a></h2>
-                <p>Requester: @record.Native.Requester.Login | @record.State | @record.Approvals(Options) / 2 eligible approvals</p>
-                <p>Native status: @record.Native.Status | Expires @record.Native.ExpiresAt.ToString("u")</p>
+            <article class="request-list-card">
+                <div class="card-title-row">
+                    <h2><a href="@PortalLink(record)">@record.Native.Repository <span class="request-number">#@record.Native.Number</span></a></h2>
+                    <span class="status-badge">@record.State</span>
+                </div>
+                <p><strong>@record.Native.Requester.Login</strong> requested a push-protection bypass <time datetime="@record.Native.CreatedAt.ToString("O")" title="@record.Native.CreatedAt.ToString("u")">@RelativeTime(record.Native.CreatedAt)</time>.</p>
+                <div class="list-card-footer">
+                    <span class="approval-count">@record.Approvals(Options) / @Options.RequiredApprovals eligible approvals</span>
+                    <span class="muted">Expires @record.Native.ExpiresAt.ToString("u")</span>
+                    <a class="button" href="@PortalLink(record)">Review request <span aria-hidden="true">&rarr;</span></a>
+                </div>
+                @if (record.NotificationError is not null) { <p class="error" role="alert">@record.NotificationError</p> }
             </article>
         }
     }
@@ -59,36 +71,98 @@ else
     else
     {
         var record = selected;
-        <p><a href="/approvals">Pending approvals</a></p>
-        <article>
-            <h2>@record.Native.Repository #@record.Native.Number</h2>
-            <p>Requester: @record.Native.Requester.Login (ID @record.Native.Requester.Id)</p>
-            <p><strong>@record.State</strong> | @record.Approvals(Options) / 2 currently eligible approvals</p>
-            <p>Native status: @record.Native.Status | Last checked @record.ObservedAt.ToString("u")</p>
-            <p>Created @record.Native.CreatedAt.ToString("u") | Expires @record.Native.ExpiresAt.ToString("u")</p>
-            <p><a href="@record.Native.GitHubUrl" target="_blank" rel="noopener noreferrer">Inspect native request in GitHub</a></p>
-            <p>Request-specific portal link (share only with authorized reviewers): <a href="@PortalLink(record)">this review page</a>. No notification is sent automatically.</p>
+        var commits = record.Native.Secrets.SelectMany(secret => secret.Locations)
+            .Select(location => location.Commit).OfType<string>().Where(commit => !string.IsNullOrWhiteSpace(commit))
+            .Distinct(StringComparer.Ordinal).ToArray();
+        <nav class="back-link" aria-label="Breadcrumb"><a href="/approvals"><span aria-hidden="true">&larr;</span> Back to Pending Approvals</a><span>Request #@record.Native.Number</span></nav>
+        <section class="request-summary" aria-label="Bypass request summary">
+            <dl class="summary-fields">
+                <div><dt>User</dt><dd><strong>@record.Native.Requester.Login</strong> <span class="muted">(ID @record.Native.Requester.Id)</span></dd></div>
+                <div><dt>Repository</dt><dd><a href="@RepositoryLink(record.Native.Repository)" target="_blank" rel="noopener noreferrer">@record.Native.Repository</a></dd></div>
+                @if (commits.Length > 0)
+                {
+                    <div><dt>@(commits.Length == 1 ? "Commit" : "Commits")</dt><dd>@foreach (var commit in commits) { <code class="summary-commit">@commit</code> }</dd></div>
+                }
+                <div><dt>Time</dt><dd><time datetime="@record.Native.CreatedAt.ToString("O")" title="@record.Native.CreatedAt.ToString("u")">@RelativeTime(record.Native.CreatedAt)</time></dd></div>
+                <div><dt>Status</dt><dd><span class="status-badge">@record.State</span> <span class="muted">Native: @record.Native.Status</span></dd></div>
+                <div><dt>Expires</dt><dd>@record.Native.ExpiresAt.ToString("u")</dd></div>
+            </dl>
+            <details class="secret-details" open>
+                <summary><span class="secret-alert-icon" aria-hidden="true">!</span><strong>Secrets detected</strong><span class="secret-count">@record.Native.Secrets.Length</span></summary>
+                <div class="secret-details-body">
+                    <p class="muted">Secret metadata only. Secret values are never displayed.</p>
+                    @if (record.Native.Secrets.Length == 0) { <p>No secret metadata provided.</p> }
+                    @foreach (var secret in record.Native.Secrets)
+                    {
+                        <section class="secret-entry" aria-label="Secret metadata">
+                            <h3>@(secret.SecretType ?? "Unknown secret type")</h3>
+                            @foreach (var location in SecretLocations(secret))
+                            {
+                                <pre class="secret-location"><code>commit: @(location.Commit ?? "Not provided")
+path: @(location.Path ?? "Not provided")
+branch: @(location.Branch ?? "Not provided")</code></pre>
+                            }
+                            @if (secret.BypassReason is not null)
+                            {
+                                <p class="bypass-reason"><strong>Selected reason:</strong> @ReasonLabel(secret.BypassReason) <span class="muted">(@secret.BypassReason)</span></p>
+                            }
+                        </section>
+                    }
+                    <a href="@record.Native.GitHubUrl" target="_blank" rel="noopener noreferrer">Inspect native request in GitHub <span aria-hidden="true">&nearr;</span></a>
+                </div>
+            </details>
+        </section>
+        <section class="requester-context" aria-labelledby="requester-comments">
+            <span class="comment-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 4h14v12H9l-4 4Z" /></svg></span>
+            <div>
+                <h2 id="requester-comments" class="comment-heading">Requester comments</h2>
+                <p class="muted"><strong>@record.Native.Requester.Login</strong> submitted a bypass request <time datetime="@record.Native.CreatedAt.ToString("O")" title="@record.Native.CreatedAt.ToString("u")">@RelativeTime(record.Native.CreatedAt)</time>.</p>
+                <blockquote class="request-comment">@(string.IsNullOrWhiteSpace(record.Native.RequesterComment) ? "No comment provided." : record.Native.RequesterComment)</blockquote>
+            </div>
+        </section>
+        <section class="review-panel" aria-labelledby="review-heading">
+            <div class="card-title-row"><h2 id="review-heading">Review bypass request</h2><span class="approval-count">@record.Approvals(Options) / @Options.RequiredApprovals approvals</span></div>
+            <p>As an approver, you may allow <strong>@record.Native.Requester.Login</strong> to bypass push protection. This may expose detected secrets.</p>
+            <p class="muted">@Options.RequiredApprovals distinct eligible approvals are required. A rejection blocks approval. Review the selected reason and requester comments above before deciding.</p>
+            @if (record.NotificationSentAt is { } notified) { <p>New-request Teams webhook accepted at @notified.ToString("u").</p> }
+            @if (record.NotificationError is not null) { <p class="error" role="alert">@record.NotificationError</p> }
             @if (record.Error is not null) { <p role="alert" class="error">@record.Error</p> }
             @if (record.Decision is not null) { <p>Native intent: @record.Decision | Attempted @record.AttemptedAt?.ToString("u") | Review ID @(record.ReviewId?.ToString() ?? "Unconfirmed")</p> }
             <h3>Authenticated decisions</h3>
-            @if (record.Votes.Count == 0) { <p>No decisions yet.</p> }
+            @if (record.Votes.Count == 0) { <p>No active decisions.</p> }
             @foreach (var vote in record.Votes)
             {
-                <p>@vote.Login (ID @vote.ActorId): <strong>@(vote.Approve ? "Approved" : "Rejected")</strong> at @vote.At.ToString("u")
+                <p class="vote-record">@vote.Login (ID @vote.ActorId): <strong>@(vote.Approve ? "Approved" : "Rejected")</strong> at @vote.At.ToString("u")
                     @(!Options.Eligible(vote.ActorId) ? "- no longer eligible for approval quorum" : "")</p>
+            }
+            @foreach (var withdrawal in record.ApprovalWithdrawals)
+            {
+                <p class="vote-record muted">@withdrawal.Approval.Login (ID @withdrawal.Approval.ActorId):
+                    <strong>Approval withdrawn</strong> at @withdrawal.At.ToString("u")
+                    (originally approved at @withdrawal.Approval.At.ToString("u")). Does not count toward the quorum.</p>
             }
             @if (CanVote(record))
             {
-                <form method="post" action="/vote">
+                <form class="review-actions" method="post" action="/vote">
                     <AntiforgeryToken />
                     <input type="hidden" name="requestKey" value="@record.Native.Key" />
-                    <button class="approve" name="decision" value="approve">Approve</button>
-                    <button class="reject" name="decision" value="reject">Reject</button>
+                    <button class="reject" name="decision" value="reject">Deny request</button>
+                    <button class="approve" name="decision" value="approve">Approve request</button>
                 </form>
-                <p>Votes are final. A rejection accepted before the worker starts finalization blocks approval. Once finalization begins, voting closes.</p>
+                <p class="muted fine-print">You may undo your own approval only while it is the sole decision on a fresh, pending request. Rejections are final. Once finalization begins, voting and undo are closed.</p>
+            }
+            else if (actor is not null && record.CanUndoApproval(actor, Options, Clock.GetUtcNow()))
+            {
+                <form method="post" action="/undo-approval">
+                    <AntiforgeryToken />
+                    <input type="hidden" name="requestKey" value="@record.Native.Key" />
+                    <button>Undo approval</button>
+                </form>
+                <p class="muted fine-print">Your approval is recorded. You can withdraw it until another decision is recorded or finalization begins. The withdrawal will remain in the audit history.</p>
             }
             else { <p>Voting is unavailable: check eligibility, prior votes, rejection, expiry, synchronization freshness, and finalization status.</p> }
-        </article>
+            <p class="review-audit muted">Last checked @record.ObservedAt.ToString("u") &middot; <a href="@PortalLink(record)">Request-specific portal link</a> (authorized reviewers only)</p>
+        </section>
     }
 }
 
@@ -98,6 +172,7 @@ else
     [Parameter] public int? Number { get; set; }
     private string? RequestKey => Owner is null ? null : $"{Owner}/{Repository}#{Number}".ToLowerInvariant();
     [SupplyParameterFromQuery(Name = "recorded")] public bool Recorded { get; set; }
+    [SupplyParameterFromQuery(Name = "undone")] public bool Undone { get; set; }
     [SupplyParameterFromQuery(Name = "authError")] public bool AuthError { get; set; }
     [CascadingParameter] private Task<AuthenticationState> AuthenticationState { get; set; } = default!;
     private Actor? actor;
@@ -116,7 +191,7 @@ else
             {
                 var now = Clock.GetUtcNow();
                 records = records.Where(r => r.State == "Pending" && r.Native.IsPending(now) &&
-                    !r.Votes.Any(v => !v.Approve) && r.Approvals(Options) < 2).ToList();
+                    !r.Votes.Any(v => !v.Approve) && r.Approvals(Options) < Options.RequiredApprovals).ToList();
             }
         }
         catch (Exception ex) when (ex is Amazon.Runtime.AmazonClientException or StorageUnavailableException
@@ -127,6 +202,25 @@ else
         }
     }
     private static string PortalLink(RequestRecord record) => record.Native.PortalPath;
+    private string RepositoryLink(string repository) => new Uri(Options.GitHubOrigin, repository).AbsoluteUri;
+    private static IEnumerable<SecretLocation> SecretLocations(SecretMetadata secret) =>
+        secret.Locations.Length > 0 ? secret.Locations : [new(null, secret.Path, secret.Branch)];
+    private static string ReasonLabel(string reason) => reason switch
+    {
+        "used_in_tests" => "They're used in tests",
+        "false_positive" => "This is a false positive",
+        "fix_later" => "This will be fixed later",
+        _ => reason
+    };
+    private string RelativeTime(DateTimeOffset at)
+    {
+        var elapsed = Clock.GetUtcNow() - at;
+        if (elapsed < TimeSpan.Zero) return at.ToString("u");
+        if (elapsed.TotalMinutes < 1) return "just now";
+        if (elapsed.TotalHours < 1) return $"{(int)elapsed.TotalMinutes} minute{(elapsed.TotalMinutes < 2 ? "" : "s")} ago";
+        if (elapsed.TotalDays < 1) return $"{(int)elapsed.TotalHours} hour{(elapsed.TotalHours < 2 ? "" : "s")} ago";
+        return $"{(int)elapsed.TotalDays} day{(elapsed.TotalDays < 2 ? "" : "s")} ago";
+    }
     private bool CanVote(RequestRecord record) => actor is not null && Options.Ready &&
         Options.Eligible(actor.Id) && actor.Id != record.Native.Requester.Id &&
         record.State == "Pending" && record.Native.IsPending(DateTimeOffset.UtcNow) &&

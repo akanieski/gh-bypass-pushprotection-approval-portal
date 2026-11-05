@@ -1,21 +1,44 @@
+@inject PortalOptions Options
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Customer Approval Portal</title>
+    <title>@Options.DisplayTitle</title>
     <link rel="stylesheet" href="/portal.css" />
     <HeadOutlet />
 </head>
 <body>
-    <header><a href="/approvals">Customer Approval Portal</a><span>Two external approvals. One GitHub decision.</span></header>
+    <header class="site-header">
+        <div class="brand">
+            <a href="/approvals">@Options.DisplayTitle</a>
+            <span>@Options.RequiredApprovals external approvals. One GitHub decision.</span>
+        </div>
+        <AuthorizeView Context="authentication">
+            <Authorized>
+                @if (Actor.FromPrincipal(authentication.User) is { } actor)
+                {
+                    <div class="header-session">
+                        @if (Options.Eligible(actor.Id))
+                        {
+                            <a class="settings-link" href="/settings" aria-label="Settings" title="Settings">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m9 3-.8 2.4-2.5.5L4 9l1.5 2-1.5 2 1.7 3.1 2.5.5L9 19h4l.8-2.4 2.5-.5L18 13l-1.5-2L18 9l-1.7-3.1-2.5-.5L13 3Z" /><circle cx="11" cy="11" r="3" /></svg>
+                            </a>
+                        }
+                        <span class="signed-in">Signed in as <strong>@actor.Login</strong><small>GitHub ID @actor.Id</small></span>
+                        <form method="post" action="/logout"><AntiforgeryToken /><button class="sign-out">Sign out</button></form>
+                    </div>
+                }
+            </Authorized>
+        </AuthorizeView>
+    </header>
     <main>
-        <p class="notice">Customer-hosted custom integration, not a native GitHub quorum feature. Never paste secrets into this portal.</p>
         <Router AppAssembly="typeof(Program).Assembly">
             <Found Context="routeData"><RouteView RouteData="routeData" /></Found>
             <NotFound><h1>Page not found</h1><a href="/approvals">Return to pending approvals</a></NotFound>
         </Router>
     </main>
-    <footer>Push-protection bypass requests only. Notifications and alert dismissal are not implemented.</footer>
+    <footer>Customer-hosted integration, not a native GitHub quorum feature. Push-protection bypass requests only.<br />Never paste secrets into this portal. Optional Teams notifications; no alert dismissal.</footer>
 </body>
 </html>

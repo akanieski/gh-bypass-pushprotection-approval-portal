@@ -14,15 +14,29 @@ public interface IGitHubClient
     Task<long> ReviewAsync(string repository, int number, string decision, string message, CancellationToken cancellationToken);
 }
 
-public sealed class GitHubApiException(HttpStatusCode status, DateTimeOffset retryAt)
+public sealed record GitHubPerson(string Id, string Login);
+
+public interface IGitHubUserDirectory
+{
+    Task<IReadOnlyList<GitHubPerson>> SearchUsersAsync(string query, CancellationToken ct);
+    Task<GitHubPerson> GetUserAsync(long id, CancellationToken ct);
+}
+
+public sealed class GitHubApiException(HttpStatusCode status, DateTimeOffset retryAt,
+    string method, string endpoint, string? acceptedPermissions = null, long? rateLimitRemaining = null)
     : Exception($"GitHub API returned HTTP {(int)status}.")
 {
     public HttpStatusCode Status { get; } = status;
     public DateTimeOffset RetryAt { get; } = retryAt;
+    public string Method { get; } = method;
+    public string Endpoint { get; } = endpoint;
+    public string? AcceptedPermissions { get; } = acceptedPermissions;
+    public long? RateLimitRemaining { get; } = rateLimitRemaining;
 }
 
-public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitHubClient
+public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitHubClient, IGitHubUserDirectory
 {
+    private readonly SemaphoreSlim directoryGate = new(1, 1);
     private string? token;
     private DateTimeOffset tokenExpires;
     private DateTimeOffset retryAfter;
@@ -55,8 +69,9 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
 
     private async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken ct)
     {
+        var endpoint = new Uri(options.GitHubApiOrigin, request.RequestUri!).GetLeftPart(UriPartial.Path);
         if (retryAfter > DateTimeOffset.UtcNow)
-            throw new GitHubApiException(HttpStatusCode.TooManyRequests, retryAfter);
+            throw new GitHubApiException(HttpStatusCode.TooManyRequests, retryAfter, request.Method.Method, endpoint);
         var response = await http.SendAsync(request, ct);
         if (response.IsSuccessStatusCode) return response;
         if (response.StatusCode == HttpStatusCode.Unauthorized) token = null;
@@ -69,8 +84,12 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
             until = DateTimeOffset.FromUnixTimeSeconds(epoch).AddSeconds(5);
         retryAfter = until;
         var status = response.StatusCode;
+        var acceptedPermissions = response.Headers.TryGetValues("X-Accepted-GitHub-Permissions", out var permissions)
+            ? string.Join("; ", permissions) : null;
+        long? rateLimitRemaining = response.Headers.TryGetValues("X-RateLimit-Remaining", out var limit) &&
+            long.TryParse(limit.FirstOrDefault(), out var count) ? count : null;
         response.Dispose();
-        throw new GitHubApiException(status, until);
+        throw new GitHubApiException(status, until, request.Method.Method, endpoint, acceptedPermissions, rateLimitRemaining);
     }
 
     private async Task<JsonDocument> Api(HttpMethod method, string path, object? body, CancellationToken ct)
@@ -84,13 +103,18 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
 
     public async Task<IReadOnlyList<NativeRequest>> ListAsync(string repository, CancellationToken cancellationToken)
     {
+        var parts = repository.Split('/');
+        if (parts.Length != 2 || parts.Any(string.IsNullOrWhiteSpace))
+            throw new ArgumentException("Repository must have the form owner/repository.", nameof(repository));
+        var listPath = $"orgs/{Uri.EscapeDataString(parts[0])}/bypass-requests/secret-scanning";
+        var repositoryName = Uri.EscapeDataString(parts[1]);
         var requests = new List<NativeRequest>();
         for (var page = 1; page <= 1000; page++)
         {
             using var json = await Api(HttpMethod.Get,
-                $"{Root(repository)}?time_period=month&request_status=all&per_page=100&page={page}", null, cancellationToken);
+                $"{listPath}?repository_name={repositoryName}&time_period=month&request_status=all&per_page=100&page={page}", null, cancellationToken);
             var items = json.RootElement.EnumerateArray().ToArray();
-            requests.AddRange(items.Select(Parse));
+            requests.AddRange(items.Select(item => Parse(item, options.GitHubOrigin)));
             if (items.Length < 100) return requests;
         }
         throw new InvalidDataException("GitHub pagination safety limit reached; poll not completed.");
@@ -99,7 +123,7 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
     public async Task<NativeRequest> GetAsync(string repository, int number, CancellationToken cancellationToken)
     {
         using var json = await Api(HttpMethod.Get, $"{Root(repository)}/{number}", null, cancellationToken);
-        return Parse(json.RootElement);
+        return Parse(json.RootElement, options.GitHubOrigin);
     }
 
     public async Task<long> ReviewAsync(string repository, int number, string decision, string message, CancellationToken cancellationToken)
@@ -109,14 +133,76 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
         return id > 0 ? id : throw new JsonException("Invalid GitHub review ID.");
     }
 
-    public static NativeRequest Parse(JsonElement json)
+    public async Task<IReadOnlyList<GitHubPerson>> SearchUsersAsync(string query, CancellationToken ct)
+    {
+        await directoryGate.WaitAsync(ct);
+        try
+        {
+            using var json = await Api(HttpMethod.Get,
+                $"search/users?q={Uri.EscapeDataString(query + " in:login,name type:user")}&per_page=10", null, ct);
+            var people = json.RootElement.GetProperty("items").EnumerateArray()
+                .Where(item => item.GetProperty("type").GetString() == "User")
+                .Select(ParsePerson).DistinctBy(person => person.Id).ToList();
+            // Some Enterprise accounts are addressable but absent from user search.
+            if (!people.Any(person => person.Login.Equals(query, StringComparison.OrdinalIgnoreCase)) &&
+                System.Text.RegularExpressions.Regex.IsMatch(query, @"\A[A-Za-z0-9][A-Za-z0-9_-]{0,79}\z"))
+            {
+                try
+                {
+                    using var exact = await Api(HttpMethod.Get, $"users/{Uri.EscapeDataString(query)}", null, ct);
+                    if (exact.RootElement.GetProperty("type").GetString() == "User")
+                    {
+                        var person = ParsePerson(exact.RootElement);
+                        if (!people.Any(existing => existing.Id == person.Id)) people.Insert(0, person);
+                    }
+                }
+                catch (GitHubApiException ex) when (ex.Status == HttpStatusCode.NotFound) { retryAfter = default; }
+            }
+            return people.Take(10).ToArray();
+        }
+        finally { directoryGate.Release(); }
+    }
+
+    public async Task<GitHubPerson> GetUserAsync(long id, CancellationToken ct)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(id);
+        await directoryGate.WaitAsync(ct);
+        try
+        {
+            using var json = await Api(HttpMethod.Get,
+                $"user/{id.ToString(System.Globalization.CultureInfo.InvariantCulture)}", null, ct);
+            var person = ParsePerson(json.RootElement);
+            if (person.Id != id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                throw new JsonException("GitHub returned an unexpected user ID.");
+            return person;
+        }
+        catch (GitHubApiException ex) when (ex.Status == HttpStatusCode.NotFound)
+        {
+            retryAfter = default;
+            throw;
+        }
+        finally { directoryGate.Release(); }
+    }
+
+    private static GitHubPerson ParsePerson(JsonElement item)
+    {
+        var id = item.GetProperty("id").GetInt64();
+        var login = item.GetProperty("login").GetString();
+        if (id <= 0 || string.IsNullOrWhiteSpace(login) || item.GetProperty("type").GetString() != "User")
+            throw new JsonException("GitHub returned an invalid user.");
+        return new(id.ToString(System.Globalization.CultureInfo.InvariantCulture), login);
+    }
+
+    public static NativeRequest Parse(JsonElement json, Uri? gitHubOrigin = null)
     {
         var requester = json.GetProperty("requester");
         var responses = json.GetProperty("responses");
         var repository = json.GetProperty("repository").GetProperty("full_name").GetString() ?? throw new JsonException("Missing repository.");
         var htmlUrl = json.GetProperty("html_url").GetString();
+        gitHubOrigin ??= new Uri("https://github.com/");
         if (!Uri.TryCreate(htmlUrl, UriKind.Absolute, out var link) || link.Scheme != "https" ||
-            link.Host != "github.com" || !string.IsNullOrEmpty(link.UserInfo) ||
+            !string.Equals(link.Authority, gitHubOrigin.Authority, StringComparison.OrdinalIgnoreCase) ||
+            !string.IsNullOrEmpty(link.UserInfo) ||
             !link.AbsolutePath.StartsWith($"/{repository}/", StringComparison.OrdinalIgnoreCase))
             throw new JsonException("Unexpected GitHub request link.");
         return new(
@@ -126,6 +212,38 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
             json.GetProperty("created_at").GetDateTimeOffset(), json.GetProperty("expires_at").GetDateTimeOffset(),
             json.GetProperty("status").GetString() ?? "",
             responses.ValueKind == JsonValueKind.Null ? [] : responses.EnumerateArray().Select(r =>
-                new NativeResponse(r.GetProperty("id").GetInt64(), r.GetProperty("status").GetString() ?? "")).ToArray(), link.AbsoluteUri);
+                new NativeResponse(r.GetProperty("id").GetInt64(), r.GetProperty("status").GetString() ?? "")).ToArray(), link.AbsoluteUri)
+        {
+            RequesterComment = OptionalString(json, "requester_comment"),
+            Secrets = ParseSecretMetadata(json)
+        };
+    }
+
+    private static string? OptionalString(JsonElement json, string name) =>
+        !json.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null ? null :
+        value.ValueKind == JsonValueKind.String ? value.GetString() :
+        throw new JsonException("GitHub request context must contain string or null fields.");
+
+    private static SecretMetadata[] ParseSecretMetadata(JsonElement json)
+    {
+        if (!json.TryGetProperty("data", out var data) || data.ValueKind == JsonValueKind.Null) return [];
+        if (data.ValueKind != JsonValueKind.Array)
+            throw new JsonException("GitHub secret metadata must be an array or null.");
+        return data.EnumerateArray().Select(item => item.ValueKind == JsonValueKind.Object
+            ? new SecretMetadata(OptionalString(item, "secret_type"), OptionalString(item, "path"),
+                OptionalString(item, "branch"), OptionalString(item, "bypass_reason"))
+                { Locations = ParseLocations(item) }
+            : throw new JsonException("GitHub secret metadata entries must be objects.")).ToArray();
+    }
+
+    private static SecretLocation[] ParseLocations(JsonElement item)
+    {
+        if (!item.TryGetProperty("locations", out var locations) || locations.ValueKind == JsonValueKind.Null) return [];
+        if (locations.ValueKind != JsonValueKind.Array)
+            throw new JsonException("GitHub secret locations must be an array or null.");
+        return locations.EnumerateArray().Select(location => location.ValueKind == JsonValueKind.Object
+            ? new SecretLocation(OptionalString(location, "commit"), OptionalString(location, "path"),
+                OptionalString(location, "branch"))
+            : throw new JsonException("GitHub secret locations must be objects.")).ToArray();
     }
 }

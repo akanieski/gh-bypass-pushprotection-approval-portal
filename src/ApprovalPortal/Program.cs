@@ -14,11 +14,14 @@ using Microsoft.AspNetCore.HttpOverrides;
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting", LogLevel.Warning);
 builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
-var options = builder.Configuration.GetSection("Portal").Get<PortalOptions>() ?? new();
+var bootstrap = new PortalOptions { DataDirectory = builder.Configuration["Portal:DataDirectory"] ?? "data" };
+var settingsStore = new PortalSettingsStore(bootstrap);
+var options = settingsStore.LoadFrom(builder.Configuration.GetSection("Portal"));
 if (!string.IsNullOrWhiteSpace(options.OAuthClientSecretFile))
     options.OAuthClientSecret = File.ReadAllText(options.OAuthClientSecretFile).Trim();
 Directory.CreateDirectory(options.DataDirectory);
 builder.Services.AddSingleton(options);
+builder.Services.AddSingleton(settingsStore);
 builder.Services.AddDataProtection().SetApplicationName("CustomerApprovalPortal")
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(options.DataDirectory, "keys")));
 builder.Services.AddRazorComponents();
@@ -41,9 +44,9 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         oauth.ClientId = string.IsNullOrWhiteSpace(options.OAuthClientId) ? "not-configured" : options.OAuthClientId;
         oauth.ClientSecret = string.IsNullOrWhiteSpace(options.OAuthClientSecret) ? "not-configured" : options.OAuthClientSecret;
         oauth.CallbackPath = "/signin-github";
-        oauth.AuthorizationEndpoint = "https://github.com/login/oauth/authorize";
-        oauth.TokenEndpoint = "https://github.com/login/oauth/access_token";
-        oauth.UserInformationEndpoint = "https://api.github.com/user";
+        oauth.AuthorizationEndpoint = new Uri(options.GitHubOrigin, "login/oauth/authorize").AbsoluteUri;
+        oauth.TokenEndpoint = new Uri(options.GitHubOrigin, "login/oauth/access_token").AbsoluteUri;
+        oauth.UserInformationEndpoint = new Uri(options.GitHubApiOrigin, "user").AbsoluteUri;
         oauth.UsePkce = true;
         oauth.SaveTokens = false;
         oauth.Events = new OAuthEvents
@@ -96,13 +99,22 @@ builder.Services.AddSingleton<IObjectStore>(services =>
     };
 });
 builder.Services.AddSingleton<WorkerStatus>();
-builder.Services.AddHttpClient<IGitHubClient, GitHubClient>(client =>
+void ConfigureGitHubClient(HttpClient client)
 {
-    client.BaseAddress = new Uri("https://api.github.com/");
+    client.BaseAddress = options.GitHubApiOrigin;
     client.Timeout = TimeSpan.FromSeconds(30);
     client.DefaultRequestHeaders.UserAgent.ParseAdd("CustomerApprovalPortal/1.0");
     client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
     client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2026-03-10");
+}
+builder.Services.AddHttpClient<IGitHubClient, GitHubClient>(ConfigureGitHubClient)
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient<GitHubClient>(ConfigureGitHubClient)
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
+builder.Services.AddSingleton<IGitHubUserDirectory>(services => services.GetRequiredService<GitHubClient>());
+builder.Services.AddHttpClient<IApprovalNotifier, TeamsNotifier>(client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(10);
 }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<ApprovalService>();
 builder.Services.AddHostedService<ApprovalWorker>();
@@ -163,6 +175,94 @@ app.MapPost("/vote", async (HttpContext context, IAntiforgery antiforgery, Appro
     }
     catch (VoteException ex) { return Results.Text(ex.Message, statusCode: 409); }
     catch (StorageConflictException) { return Results.Text("Approval state changed concurrently. Reload the request before voting again.", statusCode: 409); }
+});
+app.MapPost("/undo-approval", async (HttpContext context, IAntiforgery antiforgery, ApprovalService approvals) =>
+{
+    try { await antiforgery.ValidateRequestAsync(context); }
+    catch (AntiforgeryValidationException) { return Results.Text("Invalid anti-forgery token.", statusCode: 400); }
+    var actor = Actor.FromPrincipal(context.User);
+    if (actor is null) return Results.Unauthorized();
+    var form = await context.Request.ReadFormAsync(context.RequestAborted);
+    try
+    {
+        await approvals.UndoApprovalAsync(form["requestKey"].ToString(), actor, context.RequestAborted);
+        return Results.LocalRedirect("/approvals?undone=true");
+    }
+    catch (VoteException ex) { return Results.Text(ex.Message, statusCode: 409); }
+    catch (StorageConflictException) { return Results.Text("Approval state changed concurrently. Reload the request before trying to undo again.", statusCode: 409); }
+});
+app.MapGet("/settings/people", async (HttpContext context, ApprovalService approvals, IGitHubUserDirectory directory) =>
+{
+    var actor = Actor.FromPrincipal(context.User);
+    if (actor is null) return Results.Unauthorized();
+    try
+    {
+        await approvals.SettingsAsync(actor, context.RequestAborted);
+        IReadOnlyList<GitHubPerson> people;
+        if (context.Request.Query.ContainsKey("id"))
+        {
+            if (!long.TryParse(context.Request.Query["id"], System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var id) || id <= 0)
+                return Results.Text("Invalid GitHub user ID.", statusCode: 400);
+            people = [await directory.GetUserAsync(id, context.RequestAborted)];
+        }
+        else
+        {
+            var query = context.Request.Query["q"].ToString().Trim();
+            if (!System.Text.RegularExpressions.Regex.IsMatch(query, @"\A[\p{L}\p{N}_. -]{2,80}\z"))
+                return Results.Text("Enter 2-80 letters, numbers, spaces, dots, underscores or hyphens.", statusCode: 400);
+            people = await directory.SearchUsersAsync(query, context.RequestAborted);
+        }
+        await approvals.SettingsAsync(actor, context.RequestAborted);
+        return Results.Ok(people);
+    }
+    catch (SettingsAccessException) { return Results.Text("Only current approvers may look up GitHub users.", statusCode: 403); }
+    catch (GitHubApiException ex)
+    {
+        context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("GitHubPeople")
+            .LogWarning("GitHub user lookup failed; HTTP {Status}.", (int)ex.Status);
+        if (ex.Status == HttpStatusCode.NotFound) return Results.Text("GitHub user not found.", statusCode: 404);
+        if (ex.Status is HttpStatusCode.TooManyRequests or HttpStatusCode.Forbidden)
+        {
+            context.Response.Headers.RetryAfter = Math.Max(1, (int)Math.Ceiling((ex.RetryAt - DateTimeOffset.UtcNow).TotalSeconds))
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return Results.Text("GitHub user lookup is rate-limited or unavailable to this App. Try again later or contact the portal operator.", statusCode: 503);
+        }
+        return Results.Text("GitHub user lookup is unavailable. Try again later.", statusCode: 503);
+    }
+    catch (Exception ex) when (ex is HttpRequestException or JsonException or IOException or UnauthorizedAccessException ||
+        ex is OperationCanceledException && !context.RequestAborted.IsCancellationRequested)
+    {
+        context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("GitHubPeople")
+            .LogError("GitHub user lookup failed; type {FailureType}.", ex.GetType().Name);
+        return Results.Text("GitHub user lookup is unavailable. Try again later or contact the portal operator.", statusCode: 503);
+    }
+});
+app.MapPost("/settings/save", async (HttpContext context, IAntiforgery antiforgery, ApprovalService approvals) =>
+{
+    try { await antiforgery.ValidateRequestAsync(context); }
+    catch (AntiforgeryValidationException) { return Results.Text("Invalid anti-forgery token.", statusCode: 400); }
+    var actor = Actor.FromPrincipal(context.User);
+    if (actor is null) return Results.Unauthorized();
+    var form = await context.Request.ReadFormAsync(context.RequestAborted);
+    if (!int.TryParse(form["requiredApprovals"], System.Globalization.NumberStyles.None,
+        System.Globalization.CultureInfo.InvariantCulture, out var required))
+        return Results.Text("Required approvals must be an integer of at least two.", statusCode: 400);
+    try
+    {
+        await approvals.SaveSettingsAsync(actor, form["organizationSlug"].ToString(), form["approverIdsCsv"].ToString(),
+            required, form["version"].ToString(), context.RequestAborted);
+        return Results.LocalRedirect("/settings?saved=true");
+    }
+    catch (SettingsAccessException) { return Results.Text("Only current approvers may change settings.", statusCode: 403); }
+    catch (SettingsValidationException ex) { return Results.Text(ex.Message, statusCode: 400); }
+    catch (StorageConflictException) { return Results.Text("Settings changed concurrently. Reload Settings before saving again.", statusCode: 409); }
+    catch (Exception ex) when (ex is StorageUnavailableException or IOException or UnauthorizedAccessException)
+    {
+        context.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("PortalSettings")
+            .LogError("Settings save failed; type {FailureType}.", ex.GetType().Name);
+        return Results.Text("Settings could not be saved. No configuration change was applied; consult operator logs.", statusCode: 503);
+    }
 });
 app.MapRazorComponents<App>();
 app.Run();
