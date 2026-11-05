@@ -4,6 +4,20 @@ A customer-hosted .NET 10 / Blazor portal that collects a quorum of approvals (d
 
 **This is a custom integration, not a native GitHub quorum.** Privileged GitHub users can still act outside the portal. Use a disposable repository and fake test secrets when validating it.
 
+## Portal experience
+
+**Empty queue.** Signed-in users see when there are no pending requests visible to them.
+
+![Pending approvals page with no requests awaiting review](images/portal-empty-queue.png)
+
+**Pending request.** Each card shows the requester, approval count, expiry, and a link to review.
+
+![Pending bypass request showing zero of two required approvals and a Review request button](images/portal-pending-request.png)
+
+**Review page.** Reviewers inspect request details, detected-secret metadata, and comments before approving or denying.
+
+![Bypass request detail page with request context, approval history, and deny and approve buttons](images/portal-review-request.png)
+
 ## GitHub App setup
 
 One organization-owned GitHub App handles both reviewer sign-in and worker API calls.
