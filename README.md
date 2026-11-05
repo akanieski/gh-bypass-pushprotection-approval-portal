@@ -1,4 +1,4 @@
-# Bypass Push Protection Approvals
+# Bypass Push Protection Approval Portal
 
 A .NET 10 / Blazor example that collects multiple approvals before submitting one native GitHub push-protection bypass review. The quorum defaults to two. This is a custom integration, not a native GitHub feature.
 
