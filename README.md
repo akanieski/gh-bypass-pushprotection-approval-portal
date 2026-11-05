@@ -1,5 +1,7 @@
 # Bypass Push Protection Approval Portal
 
+Extend GitHub push protection with a lightweight, open-source portal that requires multiple reviewers to approve secret-scanning bypass requests! Built with .NET and Blazor, it combines GitHub sign-in, configurable approval policies, and a simple Azure hosting template.
+
 A .NET 10 / Blazor example that collects multiple approvals before submitting one native GitHub push-protection bypass review. The quorum defaults to two. This is a custom integration, not a native GitHub feature.
 
 ## Run locally
