@@ -29,11 +29,17 @@ else if (settings is not null)
             <p id="approver-help" class="muted">Comma-separated numeric GitHub user IDs. Enable JavaScript to search for people instead.</p>
             <div id="approver-picker" hidden>
                 <label for="approver-search">GitHub approvers</label>
-                <p id="picker-help" class="muted">Search by GitHub username or name on this portal's GitHub host, then select people to add. Removing yourself removes your access to Settings. Changes are not applied until you save.</p>
-                <ul id="selected-approvers" class="people-list" aria-label="Selected approvers"></ul>
-                <input id="approver-search" type="search" autocomplete="off" maxlength="80" aria-describedby="picker-help picker-status" placeholder="Search GitHub users" />
+                <p id="picker-help" class="muted">Type at least two characters to find GitHub users, then select a suggestion. Use the arrow keys and Enter to select, or Escape to close. For Enterprise accounts, use the exact username if name search finds nothing. Removing yourself removes your access to Settings. Changes are not applied until you save.</p>
+                <div class="people-lookup">
+                    <input id="approver-search" type="text" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="approver-results" autocomplete="off" maxlength="80" aria-describedby="picker-help picker-status" placeholder="GitHub username or name" />
+                    <ul id="approver-results" class="people-suggestions" role="listbox" aria-label="Matching GitHub users" hidden></ul>
+                </div>
                 <p id="picker-status" class="muted" role="status" aria-live="polite"></p>
-                <ul id="approver-results" class="people-list" aria-label="Matching GitHub users"></ul>
+                <table id="selected-approvers" class="people-table" aria-label="Selected approvers">
+                    <caption>Selected approvers</caption>
+                    <thead><tr><th scope="col">GitHub user</th><th scope="col">GitHub ID</th><th scope="col">Action</th></tr></thead>
+                    <tbody></tbody>
+                </table>
             </div>
             <label for="required-approvals">Required approvals</label>
             <input id="required-approvals" type="number" name="requiredApprovals" min="2" step="1" value="@settings.RequiredApprovals" required />

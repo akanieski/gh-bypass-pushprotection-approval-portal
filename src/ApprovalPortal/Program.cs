@@ -129,7 +129,7 @@ app.UseExceptionHandler(error => error.Run(async context =>
 app.Use(async (context, next) =>
 {
     context.Response.Headers.CacheControl = "no-store";
-    context.Response.Headers.ContentSecurityPolicy = "default-src 'self'; style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+    context.Response.Headers.ContentSecurityPolicy = $"default-src 'self'; img-src 'self' {options.GitHubOrigin.GetLeftPart(UriPartial.Authority)} {options.GitHubAvatarOrigin.GetLeftPart(UriPartial.Authority)}; style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
     context.Response.Headers.XContentTypeOptions = "nosniff";
     context.Response.Headers["Referrer-Policy"] = "no-referrer";
     if (context.Request.Path != "/health" && options.Ready &&

@@ -20,11 +20,21 @@ button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px soli
 .settings-form input:focus-visible { outline: 3px solid #0969da; outline-offset: 2px; }
 .settings-form p { font-size: 12px; }
 .settings-form button { justify-self: start; }
-.people-list { list-style: none; padding: 0; margin: 10px 0; }
-.people-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid #d1d9e0; border-radius: 6px; margin-bottom: 8px; }
-.people-list li > span { min-width: 0; overflow-wrap: anywhere; }
-.people-list small { display: block; color: #59636e; font-size: 11px; }
-.people-list button { flex-shrink: 0; }
+.people-lookup { position: relative; }
+.people-suggestions { position: absolute; z-index: 1; top: 100%; left: 0; right: 0; max-height: 280px; overflow-y: auto; margin: 4px 0 0; padding: 4px; list-style: none; background: #fff; border: 1px solid #d1d9e0; border-radius: 6px; box-shadow: 0 8px 24px #1f23281f; }
+.people-suggestions [role="option"] { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 8px; border-radius: 4px; cursor: pointer; }
+.people-suggestions [role="option"]:hover, .people-suggestions [aria-selected="true"] { background: #ddf4ff; }
+.people-suggestions .person-identity { min-width: 0; }
+.people-suggestions small { flex-shrink: 0; color: #59636e; font-size: 11px; }
+.people-table { width: 100%; table-layout: fixed; border-collapse: collapse; margin: 16px 0; border: 1px solid #d1d9e0; font-size: 13px; }
+.people-table caption { text-align: left; font-weight: 600; margin-bottom: 8px; }
+.people-table th, .people-table td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #d1d9e0; overflow-wrap: anywhere; }
+.people-table th { background: #f6f8fa; font-size: 12px; }
+.people-table th:last-child, .people-table td:last-child:not([colspan]) { width: 84px; text-align: right; }
+.people-table button { padding: 6px 8px; }
+.person-identity { display: flex; align-items: center; gap: 8px; }
+.person-identity > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.person-avatar { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%; background: #eaeef2; color: #59636e; font-weight: 600; object-fit: cover; }
 #approver-picker > label { display: block; margin-bottom: 10px; }
 #picker-status { margin-top: 8px; }
 form { margin: 0; }

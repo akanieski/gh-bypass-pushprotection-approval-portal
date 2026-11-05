@@ -79,13 +79,23 @@ public sealed class SettingsHttpTests : IDisposable
         Assert.Contains("id=\"approver-picker\"", html);
         Assert.Contains("src=\"/approver-picker.js\"", html);
         Assert.Contains("aria-label=\"Selected approvers\"", html);
+        Assert.Contains("<table id=\"selected-approvers\"", html);
+        Assert.Contains("role=\"combobox\" aria-autocomplete=\"list\" aria-expanded=\"false\" aria-controls=\"approver-results\"", html);
+        Assert.Contains("id=\"approver-results\" class=\"people-suggestions\" role=\"listbox\"", html);
+        Assert.DoesNotContain("id=\"approver-lookup\"", html);
+        Assert.Contains("<th scope=\"col\">GitHub ID</th>", html);
         var response = await client.GetAsync("/settings/people?q=jane");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl!.ToString());
+        var csp = Assert.Single(response.Headers.GetValues("Content-Security-Policy"));
+        Assert.Contains("img-src 'self' https://github.com https://avatars.githubusercontent.com;", csp);
+        Assert.Contains("default-src 'self';", csp);
         Assert.Contains("\"id\":\"40\"", await response.Content.ReadAsStringAsync());
         response = await client.GetAsync("/settings/people?id=10");
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("\"login\":\"user10\"", await response.Content.ReadAsStringAsync());
+        var personJson = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"login\":\"user10\"", personJson);
+        Assert.Contains("\"avatarUrl\":\"https://avatars.githubusercontent.com/u/10\"", personJson);
         using var outsider = Client(factory, 99);
         Assert.Equal(HttpStatusCode.Forbidden, (await outsider.GetAsync("/settings/people?q=jane")).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await outsider.GetAsync("/settings/people?id=10")).StatusCode);
@@ -131,7 +141,8 @@ public sealed class SettingsHttpTests : IDisposable
             "offline" => throw new HttpRequestException("private-upstream-detail"),
             _ => Task.FromResult<IReadOnlyList<GitHubPerson>>([new("40", "jane")])
         };
-        public Task<GitHubPerson> GetUserAsync(long id, CancellationToken ct) => Task.FromResult(new GitHubPerson(id.ToString(), "user" + id));
+        public Task<GitHubPerson> GetUserAsync(long id, CancellationToken ct) => Task.FromResult(
+            new GitHubPerson(id.ToString(), "user" + id, "https://avatars.githubusercontent.com/u/" + id));
     }
 
     [Fact]

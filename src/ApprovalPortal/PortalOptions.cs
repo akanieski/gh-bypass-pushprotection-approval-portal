@@ -25,6 +25,8 @@ public sealed class PortalOptions
     public Uri GitHubOrigin => Uri.CheckHostName(GitHubHost) == UriHostNameType.Dns
         ? new($"https://{GitHubHost}/")
         : throw new InvalidOperationException("Portal:GitHubHost must be a DNS hostname without a scheme, port or path.");
+    public Uri GitHubAvatarOrigin => GitHubOrigin.Host == "github.com"
+        ? new("https://avatars.githubusercontent.com/") : GitHubOrigin;
     public Uri GitHubApiOrigin
     {
         get

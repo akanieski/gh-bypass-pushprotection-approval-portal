@@ -14,7 +14,7 @@ public interface IGitHubClient
     Task<long> ReviewAsync(string repository, int number, string decision, string message, CancellationToken cancellationToken);
 }
 
-public sealed record GitHubPerson(string Id, string Login);
+public sealed record GitHubPerson(string Id, string Login, string? AvatarUrl = null);
 
 public interface IGitHubUserDirectory
 {
@@ -37,6 +37,8 @@ public sealed class GitHubApiException(HttpStatusCode status, DateTimeOffset ret
 public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitHubClient, IGitHubUserDirectory
 {
     private readonly SemaphoreSlim directoryGate = new(1, 1);
+    private IReadOnlyList<GitHubPerson>? collaborators;
+    private DateTimeOffset collaboratorsExpire;
     private string? token;
     private DateTimeOffset tokenExpires;
     private DateTimeOffset retryAfter;
@@ -143,6 +145,11 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
             var people = json.RootElement.GetProperty("items").EnumerateArray()
                 .Where(item => item.GetProperty("type").GetString() == "User")
                 .Select(ParsePerson).DistinctBy(person => person.Id).ToList();
+            var repositoryMatches = (await RepositoryCollaborators(ct))
+                .Where(person => person.Login.Contains(query, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(person => person.Login.StartsWith(query, StringComparison.OrdinalIgnoreCase))
+                .ThenBy(person => person.Login, StringComparer.OrdinalIgnoreCase);
+            people = repositoryMatches.Concat(people).DistinctBy(person => person.Id).ToList();
             // Some Enterprise accounts are addressable but absent from user search.
             if (!people.Any(person => person.Login.Equals(query, StringComparison.OrdinalIgnoreCase)) &&
                 System.Text.RegularExpressions.Regex.IsMatch(query, @"\A[A-Za-z0-9][A-Za-z0-9_-]{0,79}\z"))
@@ -161,6 +168,44 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
             return people.Take(10).ToArray();
         }
         finally { directoryGate.Release(); }
+    }
+
+    private async Task<IReadOnlyList<GitHubPerson>> RepositoryCollaborators(CancellationToken ct)
+    {
+        if (collaborators is not null && collaboratorsExpire > DateTimeOffset.UtcNow) return collaborators;
+        var users = new Dictionary<string, GitHubPerson>();
+        foreach (var repository in options.Repositories.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            for (var page = 1; ; page++)
+            {
+                if (page > 100)
+                    throw new InvalidDataException("GitHub collaborator pagination safety limit reached; directory lookup not completed.");
+                JsonDocument json;
+                try
+                {
+                    json = await Api(HttpMethod.Get,
+                        $"repos/{repository}/collaborators?affiliation=all&per_page=100&page={page}", null, ct);
+                }
+                catch (GitHubApiException ex) when (ex.Status == HttpStatusCode.NotFound)
+                {
+                    throw new InvalidDataException("A configured GitHub repository's collaborator directory is unavailable.", ex);
+                }
+                using (json)
+                {
+                    var items = json.RootElement.EnumerateArray().ToArray();
+                    foreach (var item in items.Where(item => item.GetProperty("type").GetString() == "User"))
+                    {
+                        var person = ParsePerson(item);
+                        users[person.Id] = person;
+                    }
+                    if (items.Length < 100) break;
+                }
+            }
+        }
+        ct.ThrowIfCancellationRequested();
+        collaborators = users.Values.ToArray();
+        collaboratorsExpire = DateTimeOffset.UtcNow.AddMinutes(1);
+        return collaborators;
     }
 
     public async Task<GitHubPerson> GetUserAsync(long id, CancellationToken ct)
@@ -184,13 +229,20 @@ public sealed class GitHubClient(HttpClient http, PortalOptions options) : IGitH
         finally { directoryGate.Release(); }
     }
 
-    private static GitHubPerson ParsePerson(JsonElement item)
+    private GitHubPerson ParsePerson(JsonElement item)
     {
         var id = item.GetProperty("id").GetInt64();
         var login = item.GetProperty("login").GetString();
         if (id <= 0 || string.IsNullOrWhiteSpace(login) || item.GetProperty("type").GetString() != "User")
             throw new JsonException("GitHub returned an invalid user.");
-        return new(id.ToString(System.Globalization.CultureInfo.InvariantCulture), login);
+        var avatarUrl = item.TryGetProperty("avatar_url", out var avatar) ? avatar.GetString() : null;
+        if (avatarUrl is not null &&
+            (!Uri.TryCreate(avatarUrl, UriKind.Absolute, out var avatarUri) || avatarUri.Scheme != "https" ||
+             !string.IsNullOrEmpty(avatarUri.UserInfo) || !string.IsNullOrEmpty(avatarUri.Fragment) ||
+             (avatarUri.GetLeftPart(UriPartial.Authority) != options.GitHubAvatarOrigin.GetLeftPart(UriPartial.Authority) &&
+              avatarUri.GetLeftPart(UriPartial.Authority) != options.GitHubOrigin.GetLeftPart(UriPartial.Authority))))
+            throw new JsonException("GitHub returned an untrusted avatar URL.");
+        return new(id.ToString(System.Globalization.CultureInfo.InvariantCulture), login, avatarUrl);
     }
 
     public static NativeRequest Parse(JsonElement json, Uri? gitHubOrigin = null)
