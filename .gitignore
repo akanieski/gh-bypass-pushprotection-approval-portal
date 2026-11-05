@@ -3,6 +3,8 @@
 **/TestResults/
 .vs/
 .env
+.env.*
+!.env.example
 secrets/
 data/
 *.pem
